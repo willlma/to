@@ -1,0 +1,14 @@
+.git
+.env*
+_build
+deps
+node_modules
+assets/node_modules
+artifacts
+test
+e2e
+*.db
+*.db-*
+erl_crash.dump
+priv/static/assets
+priv/static/cache_manifest.json

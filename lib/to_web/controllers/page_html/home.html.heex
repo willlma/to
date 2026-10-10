@@ -1,0 +1,10 @@
+<main>
+  <h1>To</h1>
+  <p>A small shared list for Nicole and Will.</p>
+  <p :if={@flash["error"]} role="alert">{@flash["error"]}</p>
+  <p><a href="/auth/google">Sign in with Google</a></p>
+  <p :if={!@google_configured}>Google sign-in needs configuration.</p>
+  <p :if={@dev_login}>
+    Development: <a href="/dev/login/nicole">Nicole</a> · <a href="/dev/login/will">Will</a>
+  </p>
+</main>

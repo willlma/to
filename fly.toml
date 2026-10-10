@@ -1,0 +1,35 @@
+# Choose a nearby region before deploying.
+app = "town"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PHX_HOST = "town.fly.dev"
+  PORT = "8080"
+  DATABASE_PATH = "/data/to.db"
+
+[[mounts]]
+  source = "to_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    method = "GET"
+    path = "/"
+    timeout = "5s"
+    headers = { "X-Forwarded-Proto" = "https" }
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
