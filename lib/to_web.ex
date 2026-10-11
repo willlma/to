@@ -81,6 +81,7 @@ defmodule ToWeb do
     quote do
       # HTML escaping functionality
       import Phoenix.HTML
+      import ToWeb.CoreComponents
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

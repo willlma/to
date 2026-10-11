@@ -77,6 +77,76 @@ const Notifications = {
 
 const hooks = {
   Notifications,
+  TaskDialog: {
+    mounted() {
+      this.quick = document.getElementById("quick-title")
+      this.form = this.el.querySelector("form")
+      this.title = this.el.querySelector("#task-title")
+      this.position = () => {
+        const rect = this.quick.getBoundingClientRect()
+        const top = Math.max(8, Math.min(rect.top, window.innerHeight - 150))
+        Object.assign(this.el.style, {
+          top: `${top}px`, left: `${rect.left}px`, width: `${rect.width}px`,
+          maxHeight: `${Math.max(150, window.innerHeight - top - 8)}px`
+        })
+      }
+      this.open = () => {
+        this.position()
+        if (!this.el.open) this.el.showModal()
+        this.title.focus()
+      }
+      this.input = () => {
+        if (!this.quick.value) return
+        const value = this.quick.value
+        const start = this.quick.selectionStart
+        const end = this.quick.selectionEnd
+        this.title.value = value
+        this.open()
+        this.title.setSelectionRange(start, end)
+        this.title.dispatchEvent(new Event("input", {bubbles: true}))
+      }
+      this.cancel = () => {
+        this.form.reset()
+        this.quick.value = ""
+        this.el.close()
+        this.quick.focus()
+        this.pushEvent("cancel-task", {})
+      }
+      this.cancelEvent = event => { event.preventDefault(); this.cancel() }
+      this.click = event => {
+        const rect = this.el.getBoundingClientRect()
+        const outside = event.target === this.el &&
+          (event.clientX < rect.left || event.clientX > rect.right ||
+           event.clientY < rect.top || event.clientY > rect.bottom)
+        if (outside || event.target.closest("[data-cancel-task]")) this.cancel()
+      }
+      this.keydown = event => {
+        if (event.key !== "Enter" || event.isComposing || event.target !== this.title) return
+        event.preventDefault()
+        if (event.shiftKey) this.el.querySelector("#task-description").focus()
+        else this.form.requestSubmit()
+      }
+      this.quick.addEventListener("input", this.input)
+      this.el.addEventListener("cancel", this.cancelEvent)
+      this.el.addEventListener("click", this.click)
+      this.el.addEventListener("keydown", this.keydown)
+      window.addEventListener("resize", this.position)
+      this.handleEvent("open-task", () => this.open())
+      this.handleEvent("task-saved", () => {
+        this.form.reset()
+        this.quick.value = ""
+        this.el.close()
+        this.quick.focus()
+      })
+    },
+    destroyed() {
+      this.quick.removeEventListener("input", this.input)
+      this.el.removeEventListener("cancel", this.cancelEvent)
+      this.el.removeEventListener("click", this.click)
+      this.el.removeEventListener("keydown", this.keydown)
+      window.removeEventListener("resize", this.position)
+    }
+  },
   InlineTask: {
     mounted() {
       this.keydown = event => {
@@ -102,7 +172,7 @@ const hooks = {
   QuickEntry: {
     mounted() {
       this.keydown = event => {
-        const title = document.getElementById("task-title")
+        const title = document.getElementById("quick-title")
         if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key) &&
           event.target.matches('li > input[type="checkbox"]')) {
           event.preventDefault()
@@ -111,10 +181,6 @@ const hooks = {
           const index = Math.max(0, Math.min(groups.length - 1,
             groups.indexOf(row.dataset.group) + (event.key === "ArrowDown" ? 1 : -1)))
           this.pushEvent("move-task", {id: row.dataset.taskId, group: groups[index]})
-        } else if (event.target === title && event.key === "Enter" && event.shiftKey) {
-          event.preventDefault()
-          document.getElementById("task-details").open = true
-          document.getElementById("task-description").focus()
         } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing &&
           !event.target.closest('input, textarea, select, button, summary, a, [contenteditable], dialog')) {
           title.focus()
@@ -172,11 +238,6 @@ const hooks = {
       this.el.addEventListener("pointerup", this.pointerup)
       this.el.addEventListener("pointercancel", this.pointerup)
       this.el.addEventListener("click", this.click, true)
-      this.handleEvent("task-saved", () => {
-        document.getElementById("task-form").reset()
-        document.getElementById("task-details").open = false
-        document.getElementById("task-title").focus()
-      })
       this.handleEvent("focus-group", ({name}) => {
         const input = [...document.querySelectorAll("input[data-group]")].find(input => input.dataset.group === name)
         if (input) { input.focus(); input.select() }

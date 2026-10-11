@@ -12,7 +12,7 @@ function taskRow(page, title) {
 }
 
 async function createTask(page, title, options = {}) {
-  await page.locator('#task-title').fill(title);
+  await page.locator('#quick-title').fill(title);
   if (Object.keys(options).length) {
     await page.locator('#task-title').press('Shift+Enter');
     await expect(page.locator('#task-description')).toBeVisible();
@@ -44,7 +44,7 @@ async function googleTasks(request, person) { return Object.values((await google
 
 test('shared lists, keyboard entry, details, due ordering, groups, completion and reload', async ({page, browser}) => {
   await signIn(page);
-  await page.locator('#task-title').blur();
+  await page.locator('#quick-title').blur();
   await page.keyboard.type('Body typing');
   await expect(page.locator('#task-title')).toHaveValue('Body typing');
   await page.locator('#task-title').press('Enter');
@@ -62,7 +62,7 @@ test('shared lists, keyboard entry, details, due ordering, groups, completion an
   await page.getByRole('button', {name:'New list', exact:true}).click();
   await page.locator('#list-name').fill('Groceries');
   await page.locator('#list-form').getByRole('button').click();
-  await expect(page.getByRole('heading', {name:'Groceries', exact:true})).toBeVisible();
+  await expect(page.getByRole('link', {name:'Groceries', exact:true})).toBeVisible();
   await expect(page.locator('#list-name')).toBeHidden();
   await expect(nicole.getByRole('link', {name:'Groceries', exact:true})).toBeVisible();
   await nicole.getByRole('link', {name:'Groceries', exact:true}).click();
@@ -87,7 +87,7 @@ test('shared lists, keyboard entry, details, due ordering, groups, completion an
   await expect(inGroup(nicole, 'Produce').locator('[data-task-id]').filter({has:nicole.locator('input[value="Friday groceries"]')})).toBeVisible();
   await friday.getByRole('checkbox').dragTo(page.locator('input[data-group="Dairy"]'));
   await expect(inGroup(page, 'Dairy').locator('input[value="Friday groceries"]')).toBeVisible();
-  await plain.getByRole('checkbox').dragTo(page.getByRole('heading', {name:'Groceries', exact:true}));
+  await plain.getByRole('checkbox').dragTo(page.getByRole('link', {name:'Groceries', exact:true}));
   await expect(plain).toHaveAttribute('data-group', '');
   // The same move is available to keyboard users without another menu.
   await plain.getByRole('checkbox').press('Alt+ArrowDown');
@@ -113,10 +113,16 @@ test('shared lists, keyboard entry, details, due ordering, groups, completion an
 
   await expect(page.locator('header strong')).toHaveCount(0);
   await expect(page.getByRole('button', {name:/^Edit /})).toHaveCount(0);
+  const listUrl = page.url();
   await expect(page.locator('#reminder-form')).toBeHidden();
-  await page.locator('#user-menu summary').click();
+  await page.getByRole('link', {name:'Settings for Will'}).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole('heading', {name:'Settings', exact:true})).toBeVisible();
+  await expect(page.locator('#task-form')).toHaveCount(0);
   await expect(page.locator('#reminder-form')).toBeVisible();
-  await page.locator('#user-menu summary').click();
+  await expect(page.locator('#enable-notifications')).toHaveCSS('margin-top', '16px');
+  await page.getByRole('link', {name:'Back to lists'}).click();
+  await page.goto(listUrl);
 
   const milk = taskRow(page, 'Friday groceries');
   const milkId = await milk.getAttribute('data-task-id');
@@ -158,7 +164,7 @@ test('shared lists, keyboard entry, details, due ordering, groups, completion an
   // socket too, as a dropped mobile connection would.
   await page.evaluate(() => window.liveSocket.disconnect());
   await expect(page.locator('#connection-status')).toBeVisible();
-  await page.locator('#task-title').fill('Reconnect draft');
+  await page.locator('#quick-title').fill('Reconnect draft');
   await page.context().setOffline(false);
   await page.evaluate(() => window.liveSocket.connect());
   await expect(page.locator('.phx-connected')).toBeVisible({timeout:15000});
@@ -185,7 +191,7 @@ test('touch drag changes groups, cancels outside a target, and survives reload',
   await page.getByRole('button', {name:'New list', exact:true}).click();
   await page.locator('#list-name').fill('Touch grouping');
   await page.locator('#list-form').getByRole('button').click();
-  await expect(page.getByRole('heading', {name:'Touch grouping',exact:true})).toBeVisible();
+  await expect(page.getByRole('link', {name:'Touch grouping',exact:true})).toBeVisible();
   await createTask(page, 'Group anchor', {group:'Errands'});
   const row = await createTask(page, 'Touch task');
   const id = await row.getAttribute('data-task-id');
@@ -275,11 +281,13 @@ test('day-before reminders use device timezone, reschedule and cancel on complet
   const original = reminderJobs(title).find(j => j.state === 'scheduled');
   // Default 09:00 in Los Angeles is 16:00 UTC during summer.
   expect(original.scheduled_at).toContain('2030-07-02T16:00:00');
-  await page.locator('#user-menu summary').click();
+  await page.getByRole('link', {name:'Settings for Will'}).click();
   const reminderTime = page.locator('input[type="time"]');
   await reminderTime.fill('08:30');
   await page.getByRole('button', {name:'Save time', exact:true}).click();
   await expect.poll(() => reminderJobs(title).find(j => j.state === 'scheduled')?.scheduled_at).toContain('2030-07-02T15:30:00');
+  await expect(page.getByText('Reminder time saved.', {exact:true})).toBeVisible();
+  await page.getByRole('link', {name:'Back to lists'}).click();
   await editTask(page, row, {due:'2030-12-03'});
   await expect.poll(() => reminderJobs(title).find(j => j.state === 'scheduled')?.scheduled_at).toContain('2030-12-02T16:30:00');
   const tomorrow = await page.evaluate(() => {
@@ -299,4 +307,89 @@ test('day-before reminders use device timezone, reschedule and cancel on complet
   await row.getByRole('checkbox', {name: /^Complete /}).click();
   await expect.poll(() => reminderJobs(title).filter(j => j.state === 'scheduled').length).toBe(0);
   await test.info().attach('reminder-durable-jobs', {body:JSON.stringify(reminderJobs(title),null,2), contentType:'application/json'});
+});
+
+test('quick entry validation belongs to its input and clears after saving', async ({page}) => {
+  await signIn(page);
+  const title = page.locator('#task-title');
+  await expect(page.locator('#task-form [role="alert"]')).toHaveCount(0);
+  await page.locator('#quick-title').fill('Validation draft');
+  await title.press('Tab');
+  await expect(page.locator('#task-form [role="alert"]')).toHaveCount(0);
+  await title.fill('   ');
+  await title.press('Enter');
+  await expect(page.locator('#task-title-errors')).toHaveText("Todo can't be blank");
+  await expect(title).toHaveAttribute('aria-describedby', 'task-title-errors');
+  await expect(page.locator('#task-form [role="alert"]')).toHaveCount(1);
+  await title.fill('Validation saved');
+  await title.press('Enter');
+  await expect(taskRow(page, 'Validation saved')).toBeVisible();
+  await expect(title).toHaveValue('');
+  await expect(page.locator('#task-form [role="alert"]')).toHaveCount(0);
+});
+
+test('ungrouped todos precede groups while preserving due-date order', async ({page}) => {
+  await signIn(page);
+  await page.getByRole('button', {name:'New list', exact:true}).click();
+  await page.locator('#list-name').fill('Grouping order');
+  await page.locator('#list-form').getByRole('button').click();
+  await createTask(page, 'Grouped early', {due:'2030-01-01', group:'Groceries'});
+  await createTask(page, 'Ungrouped undated');
+  await createTask(page, 'Ungrouped dated', {due:'2030-02-01'});
+  const titles = page.locator('[data-task-id] input[name="task[title]"]');
+  await expect(titles).toHaveCount(3);
+  expect(await titles.nth(0).inputValue()).toBe('Ungrouped dated');
+  expect(await titles.nth(1).inputValue()).toBe('Ungrouped undated');
+  expect(await titles.nth(2).inputValue()).toBe('Grouped early');
+  await page.reload();
+  await expect(titles.nth(0)).toHaveValue('Ungrouped dated');
+  await expect(titles.nth(1)).toHaveValue('Ungrouped undated');
+  await expect(titles.nth(2)).toHaveValue('Grouped early');
+});
+
+
+test('quick entry becomes an anchored dialog and group plus prepopulates it', async ({page}) => {
+  await signIn(page);
+  const row = await createTask(page, 'Modal fixture', {group:'Modal groceries'});
+  const before = await row.boundingBox();
+  const quick = page.locator('#quick-title');
+  const anchor = await quick.boundingBox();
+  await expect(page.getByRole('button', {name:'Add', exact:true})).toBeHidden();
+  await quick.fill('Typing opens details');
+  const dialog = page.getByRole('dialog', {name:'New todo'});
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#task-title')).toHaveValue('Typing opens details');
+  await expect(page.locator('#task-title')).toBeFocused();
+  await expect(page.locator('#task-description')).toBeVisible();
+  expect((await row.boundingBox()).y).toBe(before.y);
+  expect(Math.abs((await dialog.boundingBox()).y - anchor.y)).toBeLessThan(2);
+  await page.locator('#task-title').press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(quick).toHaveValue('');
+  await page.getByRole('button', {name:'Add todo to Modal groceries', exact:true}).click();
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#task-group')).toHaveValue('Modal groceries');
+  await page.locator('#task-title').fill('Added via group');
+  await page.locator('#task-description').fill('In the same dialog');
+  await page.getByRole('button', {name:'Add', exact:true}).click();
+  await expect(dialog).toBeHidden();
+  await expect(taskRow(page, 'Added via group')).toHaveAttribute('data-group', 'Modal groceries');
+  await quick.fill('Next todo');
+  await expect(page.locator('#task-group')).toHaveValue('');
+  await page.getByRole('button', {name:'Cancel', exact:true}).click();
+  await expect(dialog).toBeHidden();
+  await expect(quick).toBeFocused();
+  await quick.fill('Outside click draft');
+  await dialog.click({position:{x:2,y:2}});
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(2, 2);
+  await expect(dialog).toBeHidden();
+  await expect(quick).toHaveValue('');
+  await expect(quick).toBeFocused();
+  await page.setViewportSize({width:390,height:844});
+  await quick.fill('Phone draft');
+  await expect(dialog).toBeVisible();
+  const bounds = await dialog.boundingBox();
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
 });

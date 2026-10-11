@@ -7,4 +7,5 @@ mix ecto.create
 mix ecto.migrate
 mix assets.setup
 mix assets.build
-npm ci --cache "${NPM_CONFIG_CACHE:-$PWD/tmp/npm-cache}" --no-audit --no-fund
+pnpm install --frozen-lockfile
+pnpm exec playwright install chromium --only-shell

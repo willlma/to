@@ -12,7 +12,7 @@ defmodule To.Sync do
       from(t in Task,
         left_join: e in GoogleExport,
         on: e.task_id == t.id,
-        where: t.assignee_id == ^user.id or e.user_id == ^user.id,
+        where: t.assignee_id == ^user.id oapr e.user_id == ^user.id,
         distinct: true
       )
     )

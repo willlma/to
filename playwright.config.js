@@ -5,7 +5,7 @@ module.exports = defineConfig({
   outputDir: 'artifacts/e2e/results',
   use: {
     baseURL: 'http://127.0.0.1:4002', browserName: 'chromium',
-    launchOptions: {executablePath: process.env.CHROMIUM_PATH || (require('node:fs').existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined), args: ['--no-sandbox']},
+    launchOptions: {args: ['--no-sandbox']},
     trace: 'on', screenshot: 'on', timezoneId: 'America/Los_Angeles'
   },
   webServer: {command: 'bash scripts/e2e.sh', url: 'http://127.0.0.1:4010/__ready', timeout: 180000, reuseExistingServer: false}

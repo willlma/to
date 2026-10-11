@@ -5,7 +5,7 @@ Google sign-in, and an installable PWA. No SPA or offline synchronization.
 
 ## Development
 
-Requires Elixir 1.18+, Erlang/OTP 27+, a C compiler, Node.js, and Chromium for E2E.
+Requires Elixir 1.18+, Erlang/OTP 27+, a C compiler, Node.js, and pnpm 12.6.0. Setup installs Chromium for E2E.
 In the prepared Codex cloud snapshot, first source `/workspace/.toolchain/activate`.
 Use the existing checkout; cloud tasks are already isolated, so no worktree is needed.
 The snapshot uses OTP 27.3.4.10, which fixes an HTTP header bug that prevented
@@ -24,8 +24,10 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
 ## Behavior
 
 - Shared named lists; the first is **To do**.
-- Typing outside another control focuses quick entry; Enter saves, Shift+Enter
-  opens the description and task details.
+- Typing outside another control focuses quick entry. Starting a todo opens a
+  native dialog over the list without moving existing todos. Enter saves from
+  the title; Shift+Enter focuses the description. Escape, Cancel, or clicking outside discards the
+  draft. The plus beside a group opens the same dialog with that group filled in.
 - Click a task's title or description to edit inline; blur or Enter saves, and
   Shift+Enter adds a description line. The checkbox toggles completion, the
   assignee circle opens the native selector, and clicking the date opens the
@@ -33,16 +35,17 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
   year, remains in the picker and hover tooltip. Undated tasks show only a
   calendar icon. Assignees show W or N in an outlined circle; unassigned tasks
   show the same circle empty.
-  Drag from a task's checkbox to a group to move it, or to the list heading to
+  Drag from a task's checkbox to a group to move it, or to the current list link to
   ungroup it. With the checkbox focused, Alt+Up/Down moves between groups.
   Moving changes the group; tasks still sort by due date.
-- Your name opens settings and sign-out. The list-name form stays hidden until
+- Your initial in a circle opens a separate settings page with sign-out. The list-name form stays hidden until
   you click the plus beside the lists. Controls share one compact row on phones,
   with the description immediately below the title.
 - Tasks have a required title and optional description, date-only `due_on`,
   assignee Nicole or Will, and a plain-string group (`nested_under`).
-- Dated tasks precede undated tasks. Groups stay together, ordered by their first
-  due task; each group's tasks sort by due date. Equal dates use creation time/id.
+- Ungrouped tasks appear before named groups. Within each section, dated tasks
+  precede undated tasks. Groups stay together, ordered by their first due task;
+  each group's tasks sort by due date. Equal dates use creation time/id.
   No position column; undated ordering is provisional.
 - Group names save after a pause or on blur. A collision opens a merge-or-rename
   dialog. Clearing a name ungroups its tasks.
@@ -95,7 +98,7 @@ are separate from production Fly secrets.
 ## End-to-end verification
 
 ```sh
-npm run test:e2e
+pnpm test:e2e
 ```
 
 The runner starts a real Phoenix server with a separate disposable SQLite database

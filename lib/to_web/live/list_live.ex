@@ -1,6 +1,6 @@
 defmodule ToWeb.ListLive do
   use ToWeb, :live_view
-  alias To.{Accounts, Reminders, Tasks}
+  alias To.{Accounts, Tasks}
   alias To.Tasks.Task
 
   def mount(_params, _session, socket) do
@@ -17,8 +17,7 @@ defmodule ToWeb.ListLive do
        show_list_form: false,
        merge: nil,
        inline_errors: %{},
-       notice: nil,
-       vapid_key: Application.get_env(:ex_nudge, :vapid_public_key)
+       notice: nil
      )}
   end
 
@@ -44,10 +43,25 @@ defmodule ToWeb.ListLive do
 
   def handle_event("validate", %{"task" => attrs}, socket) do
     form =
-      %Task{} |> Tasks.change_task(attrs) |> Map.put(:action, :validate) |> to_form(as: :task)
+      %Task{
+        list_id: socket.assigns.list.id,
+        created_by_id: socket.assigns.current_user.id,
+        updated_by_id: socket.assigns.current_user.id
+      }
+      |> Tasks.change_task(attrs)
+      |> Map.put(:action, :validate)
+      |> to_form(as: :task)
 
     {:noreply, assign(socket, form: form)}
   end
+
+  def handle_event("open-task", %{"group" => group}, socket) do
+    {:noreply,
+     socket |> assign(form: task_form(%{nested_under: group})) |> push_event("open-task", %{})}
+  end
+
+  def handle_event("cancel-task", _, socket),
+    do: {:noreply, assign(socket, form: task_form())}
 
   def handle_event("create", %{"task" => attrs}, socket) do
     case Tasks.create_task(socket.assigns.current_user, socket.assigns.list.id, attrs) do
@@ -148,16 +162,6 @@ defmodule ToWeb.ListLive do
      socket |> assign(merge: nil) |> load_tasks() |> push_event("focus-group", %{name: name})}
   end
 
-  def handle_event("reminder-time", %{"time" => time}, socket) do
-    case Reminders.update_reminder_time(socket.assigns.current_user, time) do
-      {:ok, user} ->
-        {:noreply, assign(socket, current_user: user, notice: "Reminder time saved.")}
-
-      {:error, _} ->
-        {:noreply, assign(socket, notice: "Choose a valid reminder time.")}
-    end
-  end
-
   def handle_info({:tasks_changed, _}, socket), do: {:noreply, load_tasks(socket)}
 
   def handle_info(:lists_changed, socket),
@@ -199,7 +203,7 @@ defmodule ToWeb.ListLive do
     )
   end
 
-  # Groups follow their earliest task's due date; tasks within each group keep due-date order.
+  # Ungrouped tasks come first; each section keeps its existing due-date order.
   defp groups(tasks) do
     tasks
     |> Enum.reduce([], fn task, groups ->
@@ -210,9 +214,10 @@ defmodule ToWeb.ListLive do
         index -> List.update_at(groups, index, fn {name, items} -> {name, items ++ [task]} end)
       end
     end)
+    |> Enum.sort_by(fn {name, _} -> is_binary(name) end)
   end
 
-  defp task_form, do: to_form(Tasks.change_task(%Task{}), as: :task)
+  defp task_form(attrs \\ %{}), do: to_form(Tasks.change_task(%Task{}, attrs), as: :task)
   defp result(socket, {:ok, _}), do: load_tasks(socket)
 
   defp result(socket, {:error, _}),
@@ -229,6 +234,25 @@ defmodule ToWeb.ListLive do
           String.replace(text, "%{#{key}}", to_string(val))
         end)
       end)
+
+  attr :field, Phoenix.HTML.FormField, required: true
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+
+  defp field_errors(assigns) do
+    assigns =
+      assign(assigns, :errors, if(used_input?(assigns.field), do: assigns.field.errors, else: []))
+
+    ~H"""
+    <p :if={@errors != []} id={@id} role="alert">
+      <span :for={{message, opts} <- @errors}>
+        {@label} {Enum.reduce(opts, message, fn {key, val}, text ->
+          String.replace(text, "%{#{key}}", to_string(val))
+        end)}
+      </span>
+    </p>
+    """
+  end
 
   defp task_row(assigns) do
     ~H"""
@@ -276,7 +300,7 @@ defmodule ToWeb.ListLive do
           class="task-assignee"
           title={if @task.assignee, do: @task.assignee.name, else: "Unassigned"}
         >
-          <span aria-hidden="true">{if @task.assignee, do: String.first(@task.assignee.name)}</span>
+          <.person_circle user={@task.assignee} />
           <select name="task[assignee_id]" aria-label="Assignee">
             <option value="">Unassigned</option>
             <option
@@ -302,7 +326,7 @@ defmodule ToWeb.ListLive do
         data-confirm="Delete this task?"
         aria-label={"Delete #{@task.title}"}
       >×</button>
-      <small :if={@status in [:pending, :error, :not_connected]}>{sync_label(@status)}</small>
+      <small :if={@status in [:pending, :error]}>{sync_label(@status)}</small>
       <p :for={error <- @errors} role="alert">{error}</p>
     </li>
     """
@@ -310,60 +334,35 @@ defmodule ToWeb.ListLive do
 
   defp sync_label(:pending), do: "Sync pending"
   defp sync_label(:error), do: "Sync retrying"
-  defp sync_label(:not_connected), do: "Google not connected"
 
   def render(assigns) do
     ~H"""
     <main id="to-app" phx-hook="QuickEntry">
       <header>
-        <details
-          id="user-menu"
-          phx-mounted={JS.ignore_attributes("open")}
-          phx-click-away={JS.remove_attribute("open", to: "#user-menu")}
-          phx-window-keydown={JS.remove_attribute("open", to: "#user-menu")}
-          phx-key="Escape"
-        >
-          <summary>{@current_user.name}</summary>
-          <h2>Settings</h2>
-          <p>Assigned tasks remind you the day before, in each browser's timezone.</p>
-          <.form for={%{}} id="reminder-form" phx-submit="reminder-time">
-            <label>Reminder time<input
-              name="time"
-              type="time"
-              value={Time.to_iso8601(@current_user.reminder_time)}
-              required
-            /></label><button>Save time</button>
-          </.form>
+        <nav aria-label="Lists">
+          <.link
+            :for={list <- @lists}
+            patch={~p"/lists/#{list.id}"}
+            aria-current={if list.id == @list.id, do: "page"}
+            data-drop-group={if list.id == @list.id, do: ""}
+            title={if list.id == @list.id, do: "Drop a task here to remove its group"}
+          >{list.name}</.link>
           <button
-            id="enable-notifications"
             type="button"
-            phx-hook="Notifications"
-            data-vapid-key={@vapid_key || ""}
-          >Enable notifications</button>
-          <p id="notification-status" role="status" phx-update="ignore"></p>
-          <p><a href="/auth/google">Connect Google Tasks</a></p>
-          <small>On iPhone, add To to your Home Screen before enabling notifications.</small>
-          <.form for={%{}} action="/logout" method="delete"><button>Sign out</button></.form>
-        </details>
+            phx-click="toggle-list-form"
+            aria-label="New list"
+            aria-expanded={to_string(@show_list_form)}
+            aria-controls="list-form"
+          >+</button>
+        </nav>
+        <.link navigate={~p"/settings"} aria-label={"Settings for #{@current_user.name}"}>
+          <.person_circle user={@current_user} />
+        </.link>
       </header>
       <p id="connection-status" role="status" hidden>
         Reconnecting… Your changes will need a connection.
       </p>
       <p :if={@notice} role="status">{@notice}</p>
-      <nav aria-label="Lists">
-        <.link
-          :for={list <- @lists}
-          patch={~p"/lists/#{list.id}"}
-          aria-current={if list.id == @list.id, do: "page"}
-        >{list.name}</.link>
-        <button
-          type="button"
-          phx-click="toggle-list-form"
-          aria-label="New list"
-          aria-expanded={to_string(@show_list_form)}
-          aria-controls="list-form"
-        >+</button>
-      </nav>
       <.form
         :if={@show_list_form}
         for={%{}}
@@ -373,53 +372,82 @@ defmodule ToWeb.ListLive do
       >
         <input id="list-name" name="name" aria-label="New list name" placeholder="New list" required /><button>Create list</button>
       </.form>
-      <h1 data-drop-group="" title="Drop a task here to remove its group">{@list.name}</h1>
-      <.form for={@form} id="task-form" phx-change="validate" phx-submit="create">
-        <input
-          id="task-title"
-          name="task[title]"
-          value={value(@form, :title)}
-          placeholder="Start typing a task…"
-          aria-label="Task title"
-          required
-          maxlength="300"
-          phx-debounce="300"
-          autocomplete="off"
-          autofocus
-        />
-        <button>Add</button>
-        <details id="task-details" phx-mounted={JS.ignore_attributes("open")}>
-          <summary>Details <small>Shift + Enter</small></summary>
-          <label>Description<textarea
-            id="task-description"
-            name="task[description]"
+      <input
+        id="quick-title"
+        placeholder="Start typing a task…"
+        aria-label="Task title"
+        autocomplete="off"
+        maxlength="300"
+        autofocus
+      />
+      <dialog
+        id="task-dialog"
+        phx-hook="TaskDialog"
+        phx-mounted={JS.ignore_attributes(["open", "style"])}
+        aria-label="New todo"
+      >
+        <.form for={@form} id="task-form" phx-change="validate" phx-submit="create">
+          <input
+            id="task-title"
+            aria-describedby="task-title-errors"
+            name="task[title]"
+            value={value(@form, :title)}
+            placeholder="Start typing a task…"
+            aria-label="Task title"
+            required
+            maxlength="300"
             phx-debounce="300"
-          >{value(@form, :description)}</textarea></label>
-          <label>Due date<input
-            id="task-due"
-            type="date"
-            name="task[due_on]"
-            value={value(@form, :due_on)}
-          /></label>
-          <label>Assignee<select id="task-assignee" name="task[assignee_id]"><option value="">
-            Unassigned
-          </option><option
-            :for={user <- @users}
-            value={user.id}
-            selected={to_string(value(@form, :assignee_id)) == to_string(user.id)}
-          >
-            {user.name}
-          </option></select></label>
-          <label>Group<input
-            id="task-group"
-            name="task[nested_under]"
-            value={value(@form, :nested_under)}
-            maxlength="100"
-            phx-debounce="300"
-          /></label>
-        </details>
-        <p :for={error <- errors(@form)} role="alert">{error}</p>
-      </.form>
+            autocomplete="off"
+          />
+          <.field_errors field={@form[:title]} id="task-title-errors" label="Todo" />
+          <fieldset>
+            <label>Description<textarea
+              aria-describedby="task-description-errors"
+              id="task-description"
+              name="task[description]"
+              phx-debounce="300"
+            >{value(@form, :description)}</textarea></label>
+            <.field_errors
+              field={@form[:description]}
+              id="task-description-errors"
+              label="Description"
+            />
+            <label>Due date<input
+              aria-describedby="task-due-errors"
+              id="task-due"
+              type="date"
+              name="task[due_on]"
+              value={value(@form, :due_on)}
+            /></label>
+            <.field_errors field={@form[:due_on]} id="task-due-errors" label="Due date" />
+            <label>Assignee<select
+              id="task-assignee"
+              aria-describedby="task-assignee-errors"
+              name="task[assignee_id]"
+            ><option value="">
+              Unassigned
+            </option><option
+              :for={user <- @users}
+              value={user.id}
+              selected={to_string(value(@form, :assignee_id)) == to_string(user.id)}
+            >
+              {user.name}
+            </option></select></label>
+            <.field_errors field={@form[:assignee_id]} id="task-assignee-errors" label="Assignee" />
+            <label>Group<input
+              aria-describedby="task-group-errors"
+              id="task-group"
+              name="task[nested_under]"
+              value={value(@form, :nested_under)}
+              maxlength="100"
+              phx-debounce="300"
+            /></label>
+            <.field_errors field={@form[:nested_under]} id="task-group-errors" label="Group" />
+            <button>Add</button>
+            <button type="button" data-cancel-task>Cancel</button>
+          </fieldset>
+        </.form>
+      </dialog>
       <p :if={@groups == []}>Nothing to do.</p>
       <section
         :for={{group, items} <- @groups}
@@ -436,12 +464,19 @@ defmodule ToWeb.ListLive do
             name="group[name]"
             value={group}
             aria-label="Group name"
+            size={max(String.length(group), 1)}
             data-group={group}
             maxlength="100"
             phx-debounce="400"
             phx-blur="rename-group-blur"
             phx-value-old={group}
           />
+          <button
+            type="button"
+            phx-click="open-task"
+            phx-value-group={group}
+            aria-label={"Add todo to #{group}"}
+          >+</button>
         </.form>
         <ul class={if is_binary(group), do: "grouped"}>
           <.task_row

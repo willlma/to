@@ -24,6 +24,7 @@ defmodule ToWeb.Router do
     delete "/logout", AuthController, :logout
 
     live_session :household, on_mount: [{ToWeb.UserAuth, :require_user}] do
+      live "/settings", SettingsLive
       live "/lists", ListLive
       live "/lists/:id", ListLive
     end
