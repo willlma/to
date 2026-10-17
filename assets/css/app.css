@@ -6,6 +6,12 @@ header, nav, #list-form, #task-form { display: flex; gap: .75rem; align-items: c
 header { min-height: 2rem; flex-wrap: nowrap; }
 header > a { text-decoration: none; flex-shrink: 0; }
 #enable-notifications { margin-top: 1rem; }
+#notification-status { margin: .25rem 0; }
+#reminder-form { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+#reminder-form p { flex-basis: 100%; margin: 1rem 0 0; }
+#reminder-form label { display: inline; margin: 0; }
+#reminder-form input { flex: 1; min-width: 0; }
+#reminder-form button { flex-shrink: 0; }
 header nav { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
 nav > * { flex-shrink: 0; white-space: nowrap; }
 nav button { border: 0; }

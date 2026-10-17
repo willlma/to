@@ -77,14 +77,19 @@ defmodule ToWeb.SettingsLive do
     <main>
       <.link navigate={~p"/lists"}>Back to lists</.link>
       <h1>Settings</h1>
-      <p>Assigned tasks remind you the day before, in each browser's timezone.</p>
       <.form for={%{}} id="reminder-form" phx-submit="reminder-time">
-        <label>Reminder time<input
+        <p>
+          <label for="reminder-time">
+            Assigned tasks remind you the day before, in each browser's timezone. Reminder time:
+          </label>
+        </p>
+        <input
+          id="reminder-time"
           name="time"
           type="time"
           value={Time.to_iso8601(@current_user.reminder_time)}
           required
-        /></label><button>Save time</button>
+        /><button>Save time</button>
       </.form>
       <button
         id="enable-notifications"
