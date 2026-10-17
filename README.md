@@ -17,6 +17,14 @@ bash scripts/setup.sh
 APP_DEV_LOGIN=true mix phx.server
 ```
 
+For new worktrees, use `bash scripts/setup.sh` as the install/setup script.
+The script runs the standard Phoenix `mix setup`, then installs Playwright for
+E2E tests. For development without E2E tests, `mix setup` alone is enough.
+Install the required runtimes, Hex, and Rebar once on the machine.
+No PostgreSQL or Docker service is needed.
+Each worktree has its own database. To run multiple development servers, give
+each a different port, for example `PORT=4001 APP_DEV_LOGIN=true mix phx.server`.
+
 The explicit development login option provides Nicole/Will links without Google
 credentials. It is absent from production builds. Normal Google sign-in requires
 all five OAuth settings below. `mix setup` is also available on a standard machine.
