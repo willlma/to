@@ -96,6 +96,21 @@ defmodule To.Reminders do
 
   def unsubscribe(_, _), do: {:error, :invalid_subscription}
 
+  def test_notification(user, endpoint) when is_binary(endpoint) do
+    with true <- configured?(),
+         %PushSubscription{} = subscription <-
+           Repo.get_by(PushSubscription, user_id: user.id, endpoint: endpoint) do
+      payload =
+        Jason.encode!(%{title: "Hello from town", tag: "test-notification", url: "/settings"})
+
+      ReminderWorker.send_notification(subscription, payload, ttl: 60, topic: "test-notification")
+    else
+      _ -> {:error, :invalid_subscription}
+    end
+  end
+
+  def test_notification(_, _), do: {:error, :invalid_subscription}
+
   def update_reminder_time(user, value) when is_binary(value) do
     value = if is_binary(value) && byte_size(value) == 5, do: value <> ":00", else: value
 

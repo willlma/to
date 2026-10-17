@@ -20,6 +20,7 @@ defmodule To.E2E.Mock do
           encrypted_pushes: [],
           next_id: 1,
           failures: 0,
+          token_error: nil,
           fail_create: false
         }
       end,
@@ -45,7 +46,39 @@ defmodule To.E2E.Mock do
       conn.params["code"] ||
         String.replace(conn.params["refresh_token"] || "will", "refresh-", "")
 
-    json(conn, 200, %{access_token: "access-#{person}", refresh_token: "refresh-#{person}"})
+    error = Agent.get_and_update(__MODULE__, &{&1.token_error, %{&1 | token_error: nil}})
+
+    case error do
+      "revoked" ->
+        json(conn, 400, %{error: "invalid_grant"})
+
+      "unavailable" ->
+        json(conn, 503, %{error: "temporarily_unavailable"})
+
+      _ ->
+        json(conn, 200, %{access_token: "access-#{person}", refresh_token: "refresh-#{person}"})
+    end
+  end
+
+  post "/__token-error" do
+    Agent.update(__MODULE__, &%{&1 | token_error: conn.params["error"]})
+    json(conn, 200, %{})
+  end
+
+  post "/__google-connection" do
+    user = To.Repo.get_by!(To.Accounts.User, name: conn.params["person"])
+
+    token =
+      if conn.params["connected"],
+        do:
+          Phoenix.Token.encrypt(
+            ToWeb.Endpoint,
+            "google-refresh",
+            "refresh-#{String.downcase(user.name)}"
+          )
+
+    user |> Ecto.Changeset.change(google_refresh_token: token) |> To.Repo.update!()
+    json(conn, 200, %{})
   end
 
   get "/profile" do
@@ -88,6 +121,12 @@ defmodule To.E2E.Mock do
       )
 
     Oban.retry_job(job.id)
+    json(conn, 200, %{})
+  end
+
+  post "/__sync-google" do
+    user = To.Repo.get_by!(To.Accounts.User, name: conn.params["person"])
+    To.Sync.enqueue_for_user(user)
     json(conn, 200, %{})
   end
 
@@ -186,20 +225,34 @@ defmodule To.E2E.Mock do
   end
 
   defp dispatch(conn, person, body, state) do
-    list_id = "list-#{person}"
     tasks = Map.get(state.tasks, person, %{})
 
-    case {conn.method, String.split(conn.request_path, "/", trim: true)} do
-      {"GET", ["tasks", "v1", "users", "@me", "lists"]} ->
-        {{200, %{items: [%{id: list_id, title: "To"}]}}, state}
+    # The app must use the existing default list; arbitrary lists and list
+    # creation must not silently pass this boundary simulation.
+    case {conn.method, String.split(URI.decode(conn.request_path), "/", trim: true)} do
+      {"GET", ["tasks", "v1", "lists", "@default", "tasks"]} ->
+        # Small pages exercise pagination in import and export recovery.
+        offset = String.to_integer(conn.params["pageToken"] || "0")
 
-      {"GET", ["tasks", "v1", "users", "@me", "lists", _]} ->
-        {{200, %{id: list_id, title: "To"}}, state}
+        items =
+          tasks
+          |> Map.values()
+          |> Enum.reject(&(&1["assignmentInfo"] && conn.params["showAssigned"] != "true"))
+          |> Enum.reject(
+            &(&1["status"] == "completed" && conn.params["showCompleted"] == "false")
+          )
+          |> Enum.sort_by(& &1["id"])
 
-      {"GET", ["tasks", "v1", "lists", _, "tasks"]} ->
-        {{200, %{items: Map.values(tasks)}}, state}
+        body = %{items: Enum.slice(items, offset, 2)}
 
-      {"POST", ["tasks", "v1", "lists", _, "tasks"]} ->
+        body =
+          if offset + 2 < length(items),
+            do: Map.put(body, :nextPageToken, to_string(offset + 2)),
+            else: body
+
+        {{200, body}, state}
+
+      {"POST", ["tasks", "v1", "lists", "@default", "tasks"]} ->
         id = "task-#{state.next_id}"
         task = Map.put(body, "id", id)
 
@@ -216,11 +269,19 @@ defmodule To.E2E.Mock do
           {{200, task}, state}
         end
 
-      {"PATCH", ["tasks", "v1", "lists", _, "tasks", id]} ->
-        task = Map.merge(Map.get(tasks, id, %{"id" => id}), body)
-        {{200, task}, %{state | tasks: Map.put(state.tasks, person, Map.put(tasks, id, task))}}
+      {"PATCH", ["tasks", "v1", "lists", "@default", "tasks", id]} ->
+        case Map.fetch(tasks, id) do
+          {:ok, task} ->
+            task = Map.merge(task, body)
 
-      {"DELETE", ["tasks", "v1", "lists", _, "tasks", id]} ->
+            {{200, task},
+             %{state | tasks: Map.put(state.tasks, person, Map.put(tasks, id, task))}}
+
+          :error ->
+            {{404, %{error: "task not found"}}, state}
+        end
+
+      {"DELETE", ["tasks", "v1", "lists", "@default", "tasks", id]} ->
         {{200, %{}}, %{state | tasks: Map.put(state.tasks, person, Map.delete(tasks, id))}}
 
       _ ->

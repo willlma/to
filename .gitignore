@@ -48,3 +48,4 @@ pnpm-debug.log
 
 .env
 .env.*
+mise.local.toml

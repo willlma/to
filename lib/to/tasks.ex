@@ -5,11 +5,20 @@ defmodule To.Tasks do
   alias To.Tasks.{List, Task}
 
   def list_lists do
-    %List{}
-    |> List.changeset(%{name: "To do"})
-    |> Repo.insert(on_conflict: :nothing, conflict_target: :name)
+    lists =
+      Repo.all(
+        from(l in List, where: is_nil(l.deleted_at), order_by: [asc: l.inserted_at, asc: l.id])
+      )
 
-    Repo.all(from(l in List, order_by: [asc: l.inserted_at, asc: l.id]))
+    if lists == [] do
+      %List{}
+      |> List.changeset(%{name: "To do"})
+      |> Repo.insert(on_conflict: :nothing)
+
+      list_lists()
+    else
+      lists
+    end
   end
 
   def create_list(attrs) do
@@ -19,7 +28,31 @@ defmodule To.Tasks do
     result
   end
 
-  def get_list!(id), do: Repo.get!(List, id)
+  def get_list(id), do: Repo.one(from(l in List, where: l.id == ^id and is_nil(l.deleted_at)))
+  def get_list!(id), do: Repo.one!(from(l in List, where: l.id == ^id and is_nil(l.deleted_at)))
+
+  def delete_list(actor, %List{} = list) do
+    result =
+      Repo.transaction(fn ->
+        actor_id!(actor)
+
+        if Repo.aggregate(from(l in List, where: is_nil(l.deleted_at)), :count) <= 1,
+          do: Repo.rollback(:last_list)
+
+        Repo.all(from(t in Task, where: t.list_id == ^list.id and is_nil(t.deleted_at)))
+        |> Enum.each(fn task ->
+          case delete_task(actor, task) do
+            {:ok, _} -> :ok
+            {:error, error} -> Repo.rollback(error)
+          end
+        end)
+
+        list |> Changeset.change(deleted_at: now()) |> Repo.update!()
+      end)
+
+    if match?({:ok, _}, result), do: Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
+    result
+  end
 
   def list_tasks(list_id) do
     Repo.all(
@@ -170,8 +203,10 @@ defmodule To.Tasks do
     end
   end
 
-  defp broadcast(list_id),
-    do: Phoenix.PubSub.broadcast(To.PubSub, "tasks:#{list_id}", {:tasks_changed, list_id})
+  defp broadcast(list_id) do
+    Phoenix.PubSub.broadcast(To.PubSub, "tasks:#{list_id}", {:tasks_changed, list_id})
+    To.Sync.broadcast_status()
+  end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)
 end

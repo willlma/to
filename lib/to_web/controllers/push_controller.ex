@@ -18,6 +18,10 @@ defmodule ToWeb.PushController do
 
   def delete(conn, _), do: respond(conn, {:error, :invalid_subscription})
 
+  def test_notification(conn, params) do
+    respond(conn, Reminders.test_notification(conn.assigns.current_user, params["endpoint"]))
+  end
+
   def preferences(conn, %{"reminder_time" => time}) when is_binary(time) do
     respond(conn, Reminders.update_reminder_time(conn.assigns.current_user, time))
   end

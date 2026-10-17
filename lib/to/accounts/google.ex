@@ -51,11 +51,19 @@ defmodule To.Accounts.Google do
   end
 
   def refresh_access_token(user) do
-    with {:ok, token} <- Accounts.refresh_token(user),
+    with {:ok, token} <- refresh_token(user),
          {:ok, tokens} <- token_request(%{refresh_token: token, grant_type: "refresh_token"}),
          access_token when is_binary(access_token) <- tokens["access_token"] do
       {:ok, access_token}
     else
+      {:error, _} = error -> error
+      _ -> {:error, :google_unavailable}
+    end
+  end
+
+  defp refresh_token(user) do
+    case Accounts.refresh_token(user) do
+      {:ok, token} -> {:ok, token}
       _ -> {:error, :google_reconnect_required}
     end
   end
@@ -73,8 +81,14 @@ defmodule To.Accounts.Google do
            decode_body: true,
            receive_timeout: 15_000
          ) do
-      {:ok, %{status: 200, body: tokens}} when is_map(tokens) -> {:ok, tokens}
-      _ -> {:error, :google_unavailable}
+      {:ok, %{status: 200, body: tokens}} when is_map(tokens) ->
+        {:ok, tokens}
+
+      {:ok, %{status: status, body: %{"error" => "invalid_grant"}}} when status in [400, 401] ->
+        {:error, :google_reconnect_required}
+
+      _ ->
+        {:error, :google_unavailable}
     end
   end
 

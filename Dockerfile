@@ -1,6 +1,6 @@
 # Both stages use Alpine/musl. Match the runtime Alpine version to the builder.
 ARG ELIXIR_IMAGE=elixir:1.18.4-otp-27-alpine
-ARG ALPINE_VERSION=3.24
+ARG ALPINE_VERSION=3.22
 FROM ${ELIXIR_IMAGE} AS build
 
 RUN apk add --no-cache build-base git sqlite-dev

@@ -6,6 +6,7 @@ defmodule ToWeb.ListLive do
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Tasks.subscribe_lists()
+      To.Sync.subscribe()
       Process.send_after(self(), :refresh_completed, 60_000)
     end
 
@@ -22,10 +23,12 @@ defmodule ToWeb.ListLive do
   end
 
   def handle_params(params, _uri, socket) do
+    lists = Tasks.list_lists()
+
     list =
       case params["id"] do
-        nil -> hd(Tasks.list_lists())
-        id -> Tasks.get_list!(id)
+        nil -> hd(lists)
+        id -> Tasks.get_list(id) || hd(lists)
       end
 
     if connected?(socket) do
@@ -35,10 +38,17 @@ defmodule ToWeb.ListLive do
       Tasks.subscribe(list.id)
     end
 
-    {:noreply,
-     socket
-     |> assign(list: list, show_list_form: false, inline_errors: %{}, merge: nil)
-     |> load_tasks()}
+    socket =
+      socket
+      |> assign(lists: lists, list: list, show_list_form: false, inline_errors: %{}, merge: nil)
+      |> load_tasks()
+
+    socket =
+      if params["id"] && params["id"] != to_string(list.id),
+        do: push_patch(socket, to: ~p"/lists/#{list.id}"),
+        else: socket
+
+    {:noreply, socket}
   end
 
   def handle_event("validate", %{"task" => attrs}, socket) do
@@ -59,9 +69,6 @@ defmodule ToWeb.ListLive do
     {:noreply,
      socket |> assign(form: task_form(%{nested_under: group})) |> push_event("open-task", %{})}
   end
-
-  def handle_event("cancel-task", _, socket),
-    do: {:noreply, assign(socket, form: task_form())}
 
   def handle_event("create", %{"task" => attrs}, socket) do
     case Tasks.create_task(socket.assigns.current_user, socket.assigns.list.id, attrs) do
@@ -91,6 +98,19 @@ defmodule ToWeb.ListLive do
   def handle_event("toggle-list-form", _, socket),
     do: {:noreply, assign(socket, show_list_form: !socket.assigns.show_list_form)}
 
+  def handle_event("delete-list", _, socket) do
+    case Tasks.delete_list(socket.assigns.current_user, socket.assigns.list) do
+      {:ok, _} ->
+        {:noreply, push_patch(socket, to: ~p"/lists")}
+
+      {:error, :last_list} ->
+        {:noreply, assign(socket, notice: "Keep at least one list.")}
+
+      {:error, _} ->
+        {:noreply, assign(socket, notice: "Could not delete this list. Please try again.")}
+    end
+  end
+
   def handle_event("toggle", %{"id" => id}, socket) do
     task = Tasks.get_task!(socket.assigns.list.id, id)
     {:noreply, result(socket, Tasks.toggle_task(socket.assigns.current_user, task))}
@@ -111,20 +131,29 @@ defmodule ToWeb.ListLive do
       when field in ["title", "description", "due_on", "assignee_id", "nested_under"] do
     task = Tasks.get_task!(socket.assigns.list.id, id)
 
-    # Save only the changed field so a stale form cannot overwrite the other user's edits.
-    case Tasks.update_task(socket.assigns.current_user, task, Map.take(attrs, [field])) do
-      {:ok, _} ->
-        {:noreply,
-         socket
-         |> assign(inline_errors: Map.delete(socket.assigns.inline_errors, task.id))
-         |> load_tasks()}
+    if field == "title" && String.trim(attrs["title"] || "") == "" do
+      if task.description not in [nil, ""] || task.due_on || task.assignee_id ||
+           task.nested_under || task.completed_at do
+        {:noreply, push_event(socket, "confirm-task-delete", %{id: task.id, title: task.title})}
+      else
+        {:noreply, result(socket, Tasks.delete_task(socket.assigns.current_user, task))}
+      end
+    else
+      # Save only the changed field so a stale form cannot overwrite the other user's edits.
+      case Tasks.update_task(socket.assigns.current_user, task, Map.take(attrs, [field])) do
+        {:ok, _} ->
+          {:noreply,
+           socket
+           |> assign(inline_errors: Map.delete(socket.assigns.inline_errors, task.id))
+           |> load_tasks()}
 
-      {:error, changeset} ->
-        {:noreply,
-         assign(socket,
-           inline_errors:
-             Map.put(socket.assigns.inline_errors, task.id, errors(to_form(changeset)))
-         )}
+        {:error, changeset} ->
+          {:noreply,
+           assign(socket,
+             inline_errors:
+               Map.put(socket.assigns.inline_errors, task.id, errors(to_form(changeset)))
+           )}
+      end
     end
   end
 
@@ -164,8 +193,20 @@ defmodule ToWeb.ListLive do
 
   def handle_info({:tasks_changed, _}, socket), do: {:noreply, load_tasks(socket)}
 
-  def handle_info(:lists_changed, socket),
-    do: {:noreply, assign(socket, lists: Tasks.list_lists())}
+  def handle_info({:sync_status, status}, socket),
+    do: {:noreply, assign(socket, sync_status: status)}
+
+  def handle_info(:lists_changed, socket) do
+    lists = Tasks.list_lists()
+    socket = assign(socket, lists: lists)
+
+    socket =
+      if Enum.any?(lists, &(&1.id == socket.assigns.list.id)),
+        do: socket,
+        else: push_patch(socket, to: ~p"/lists")
+
+    {:noreply, socket}
+  end
 
   def handle_info(:refresh_completed, socket) do
     Process.send_after(self(), :refresh_completed, 60_000)
@@ -199,7 +240,7 @@ defmodule ToWeb.ListLive do
     assign(socket,
       groups: groups(current),
       old_tasks: old,
-      sync_statuses: Map.new(tasks, &{&1.id, To.Sync.status(&1)})
+      sync_status: To.Sync.status()
     )
   end
 
@@ -285,14 +326,12 @@ defmodule ToWeb.ListLive do
           name="task[title]"
           value={@task.title}
           aria-label="Title"
-          required
           maxlength="300"
           phx-debounce="blur"
         />
         <textarea
           name="task[description]"
           aria-label="Description"
-          placeholder="Description"
           rows="1"
           phx-debounce="blur"
         >{@task.description}</textarea>
@@ -323,17 +362,17 @@ defmodule ToWeb.ListLive do
       <button
         phx-click="delete"
         phx-value-id={@task.id}
-        data-confirm="Delete this task?"
         aria-label={"Delete #{@task.title}"}
       >×</button>
-      <small :if={@status in [:pending, :error]}>{sync_label(@status)}</small>
       <p :for={error <- @errors} role="alert">{error}</p>
     </li>
     """
   end
 
-  defp sync_label(:pending), do: "Sync pending"
-  defp sync_label(:error), do: "Sync retrying"
+  defp sync_label(:pending), do: "Syncing Google Tasks"
+  defp sync_label(:retrying), do: "Retrying Google Tasks sync"
+  defp sync_label(:error), do: "Google Tasks sync failed; reconnect Google in settings"
+  defp sync_label(:idle), do: "No Google sync pending"
 
   def render(assigns) do
     ~H"""
@@ -355,6 +394,24 @@ defmodule ToWeb.ListLive do
             aria-controls="list-form"
           >+</button>
         </nav>
+        <span
+          id="sync-status"
+          role="status"
+          data-state={@sync_status}
+          aria-label={sync_label(@sync_status)}
+          title={sync_label(@sync_status)}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 8a8 8 0 0 0-14-2L3 9M3 3v6h6M4 16a8 8 0 0 0 14 2l3-3M21 21v-6h-6" />
+          </svg>
+        </span>
+        <button
+          :if={length(@lists) > 1}
+          type="button"
+          phx-click="delete-list"
+          data-confirm={"Delete “#{@list.name}” and all its tasks? This cannot be undone."}
+          aria-label={"Delete list #{@list.name}"}
+        >Delete list</button>
         <.link navigate={~p"/settings"} aria-label={"Settings for #{@current_user.name}"}>
           <.person_circle user={@current_user} />
         </.link>
@@ -482,7 +539,6 @@ defmodule ToWeb.ListLive do
           <.task_row
             :for={task <- items}
             task={task}
-            status={@sync_statuses[task.id]}
             users={@users}
             errors={@inline_errors[task.id] || []}
           />
@@ -493,7 +549,6 @@ defmodule ToWeb.ListLive do
           <.task_row
             :for={task <- @old_tasks}
             task={task}
-            status={@sync_statuses[task.id]}
             users={@users}
             errors={@inline_errors[task.id] || []}
           />

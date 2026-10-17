@@ -32,13 +32,22 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
 ## Behavior
 
 - Shared named lists; the first is **To do**.
+- Delete list asks for confirmation and removes all its active and completed
+  tasks for both people, cancels reminders, and queues deletion of their Google
+  copies. The last remaining list cannot be deleted.
 - Typing outside another control focuses quick entry. Starting a todo opens a
   native dialog over the list without moving existing todos. Enter saves from
-  the title; Shift+Enter focuses the description. Escape, Cancel, or clicking outside discards the
-  draft. The plus beside a group opens the same dialog with that group filled in.
-- Click a task's title or description to edit inline; blur or Enter saves, and
-  Shift+Enter adds a description line. The checkbox toggles completion, the
-  assignee circle opens the native selector, and clicking the date opens the
+  the title; Shift+Enter focuses the description. Escape, Cancel, or clicking outside
+  collapses the details and keeps the draft; resuming typing opens it again.
+  The plus beside a group opens the same dialog with that group filled in.
+- Click a task's title or description to edit inline; blur or Enter saves.
+  Enter from a title focuses quick entry; Shift+Enter focuses its description.
+  Shift+Enter in a description adds a line. Empty descriptions have no placeholder.
+  The checkbox toggles completion; × deletes immediately.
+  Clearing a title and leaving the field also deletes;
+  tasks with a description, date, assignee, group, or completion require confirmation
+  when deleted by clearing the title. Cancel restores the title.
+  The assignee circle opens the native selector, and clicking the date opens the
   native picker. Dates display compactly as **May 3**; the full date, including
   year, remains in the picker and hover tooltip. Undated tasks show only a
   calendar icon. Assignees show W or N in an outlined circle; unassigned tasks
@@ -60,9 +69,22 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
 - Completion remains in place for 24 hours, then appears in **Old Completed Items**
   in the original list. This is a view, not a database move.
 - Actor IDs and creation/update timestamps are stored. No version-history table.
-- Google sync is **one way**: eligible assigned, dated tasks go to that person's
-  dedicated **To** Google task list. Completion, edits, reassignment, deletion,
+- Google sync is **one way**: eligible assigned, dated tasks from every app list
+  go to that person's existing default Google Tasks list. App lists are not
+  created in Google Tasks. Completion, edits, reassignment, deletion,
   and removal of eligibility update/remove the copy. Google edits are not imported.
+  A single header indicator shows sync progress and retries across all lists.
+- Settings has **Import Google Tasks** to copy incomplete tasks from your default
+  Google list into the default app list (the oldest remaining list), assigned to you.
+  Undated tasks are included. Incomplete subtasks become bullets in their parent's
+  description, preserving existing notes. Importing does not modify Google.
+  Chat tasks assigned to the signed-in person are included; both people must
+  import separately. Unassigned Chat tasks are unavailable through the Tasks API.
+  Imported tasks remain linked to their originals: deleting them here also
+  deletes the original task, including its Chat task.
+  You can repeat it to pick up new tasks; Google IDs prevent duplicates even
+  after local edits, reassignment, or deletion. Existing app exports are skipped,
+  and re-importing never updates existing tasks from Google.
 - Assigned tasks get a day-before push at each person's configurable reminder
   time, using each subscribed browser's timezone. Unassigned tasks have no reminder.
   Rescheduling/completion cancels obsolete jobs; already elapsed reminders are skipped.
@@ -71,6 +93,19 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
   last saved values; there is no conflict-resolution interface in this first pass.
 
 ## Google and push setup
+
+For local development, put the variables below under `[env]` in
+`mise.local.toml` in the project root (ignored by Git). Use TOML assignments
+such as `GOOGLE_CLIENT_ID = "your-client-id"`. Mise loads it automatically:
+
+```sh
+mise trust mise.local.toml
+mise exec -- mix phx.server
+```
+
+If mise is activated in your shell, you can run `mix phx.server` directly.
+Production should supply the variables through the hosting provider's secrets
+and environment settings.
 
 Create a Google OAuth **Web application**, enable Google Tasks API, and add the
 exact callback URL to its authorized redirect URIs. For localhost it is normally
@@ -109,6 +144,11 @@ are separate from production Fly secrets.
 pnpm test:e2e
 ```
 
+One continuous household journey signs in once per person, creates and edits
+shared tasks, checks Google exports and reminders as those tasks change, exercises
+desktop and touch interaction, and finishes with deletion and recovery checks.
+Named steps organize the report without separate tests or repeated sign-in.
+
 The runner starts a real Phoenix server with a separate disposable SQLite database
 and local OAuth/Google Tasks/push boundary simulations. It exercises LiveView,
 Ecto, durable Oban jobs, shared browser sessions, scheduling, and the real
@@ -134,5 +174,13 @@ One machine means no automatic database failover. Configure and test SQLite-awar
 backups that include the WAL, or use SQLite's online backup API; copying only the
 live `.db` file is insufficient. A Fly volume is not a backup.
 
+Production is deployed at `https://town.fly.dev` in `sjc` with one 512 MB machine
+and a 1 GB `to_data` volume. Google OAuth must authorize
+`https://town.fly.dev/auth/google/callback`. Credentials and the stable
+`SECRET_KEY_BASE` live in Fly secrets; retain that key across deployments.
+Production has its own database; local development tasks are not copied.
+Scheduled volume snapshots are enabled with five-day retention. Snapshot restore
+has not yet been tested, and snapshots do not replace an independent backup.
+
 Container builds may require authenticated Docker Hub access if its anonymous
-pull-rate limit is reached. No image has been published or app deployed by this task.
+pull-rate limit is reached.

@@ -9,6 +9,8 @@ defmodule To.Tasks.Task do
     field(:nested_under, :string)
     field(:completed_at, :utc_datetime)
     field(:deleted_at, :utc_datetime)
+    field(:google_import_id, :string)
+    belongs_to(:google_import_user, To.Accounts.User)
     belongs_to(:list, To.Tasks.List)
     belongs_to(:assignee, To.Accounts.User)
     belongs_to(:created_by, To.Accounts.User)
@@ -29,6 +31,7 @@ defmodule To.Tasks.Task do
     |> foreign_key_constraint(:assignee_id)
     |> foreign_key_constraint(:created_by_id)
     |> foreign_key_constraint(:updated_by_id)
+    |> unique_constraint([:google_import_user_id, :google_import_id])
   end
 
   defp trim_title(nil), do: nil

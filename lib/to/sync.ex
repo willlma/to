@@ -7,6 +7,117 @@ defmodule To.Sync do
   # The caller inserts this job in the same transaction as the task change.
   def enqueue(task), do: SyncWorker.new(%{task_id: task.id})
 
+  def import_tasks(user) do
+    list_id = hd(To.Tasks.list_lists()).id
+
+    with {:ok, token} <- Google.refresh_access_token(user),
+         {:ok, items} <-
+           all_items("/lists/#{segment("@default")}/tasks", token, %{
+             showCompleted: false,
+             showHidden: false,
+             showAssigned: true,
+             maxResults: 100
+           }) do
+      result =
+        Repo.transaction(fn ->
+          list = To.Tasks.get_list!(list_id)
+
+          Enum.reduce(import_items(items), %{imported: 0, skipped: 0, invalid: 0}, fn remote,
+                                                                                      counts ->
+            outcome = import_task(user, list.id, remote)
+            Map.update!(counts, outcome, &(&1 + 1))
+          end)
+        end)
+
+      if match?({:ok, _}, result) do
+        Phoenix.PubSub.broadcast(To.PubSub, "tasks:#{list_id}", {:tasks_changed, list_id})
+      end
+
+      result
+    end
+  end
+
+  defp import_items(items) do
+    items = Enum.reject(items, &(&1["deleted"] == true || &1["status"] == "completed"))
+    ids = MapSet.new(items, & &1["id"])
+    children = Enum.group_by(items, & &1["parent"])
+
+    items
+    |> Enum.reject(&MapSet.member?(ids, &1["parent"]))
+    |> Enum.map(fn remote ->
+      bullets =
+        Map.get(children, remote["id"], [])
+        |> Enum.sort_by(& &1["position"])
+        |> Enum.map_join("\n", fn child ->
+          notes =
+            if child["notes"] not in [nil, ""],
+              do: "\n  " <> String.replace(child["notes"], "\n", "\n  "),
+              else: ""
+
+          "- " <> (child["title"] || "") <> notes
+        end)
+
+      notes = Enum.reject([remote["notes"], bullets], &(&1 in [nil, ""])) |> Enum.join("\n\n")
+      Map.put(remote, "notes", notes)
+    end)
+  end
+
+  defp import_task(user, list_id, %{"id" => id} = remote) when is_binary(id) and id != "" do
+    imported =
+      Repo.exists?(
+        from(t in Task,
+          where: t.google_import_user_id == ^user.id and t.google_import_id == ^id
+        )
+      )
+
+    exported =
+      Repo.exists?(
+        from(e in GoogleExport,
+          where:
+            e.user_id == ^user.id and e.google_task_id == ^id and e.google_list_id == "@default"
+        )
+      )
+
+    if imported || exported do
+      :skipped
+    else
+      attrs = %{
+        title: remote["title"],
+        description: remote["notes"],
+        assignee_id: user.id,
+        due_on: if(remote["due"], do: String.slice(remote["due"], 0, 10))
+      }
+
+      changeset =
+        %Task{list_id: list_id, created_by_id: user.id, updated_by_id: user.id}
+        |> Task.changeset(attrs)
+        |> Ecto.Changeset.change(
+          google_import_user_id: user.id,
+          google_import_id: id
+        )
+
+      case Repo.insert(changeset) do
+        {:ok, task} ->
+          case save_export(%GoogleExport{}, task, "@default", id) do
+            :ok -> :ok
+            {:error, error} -> Repo.rollback(error)
+          end
+
+          case To.Reminders.schedule(task) do
+            :ok -> :ok
+            {:error, error} -> Repo.rollback(error)
+          end
+
+          :imported
+
+        {:error, _} ->
+          :invalid
+      end
+    end
+  end
+
+  defp import_task(_, _, _), do: :invalid
+
   def enqueue_for_user(user) do
     Repo.all(
       from(t in Task,
@@ -18,29 +129,39 @@ defmodule To.Sync do
     )
     |> Enum.each(fn task -> task |> enqueue() |> Oban.insert() end)
 
+    broadcast_status()
     :ok
   end
 
-  def status(task) do
+  def status do
+    latest =
+      from(j in Oban.Job,
+        where: j.worker == "To.SyncWorker",
+        group_by: j.args,
+        select: %{id: max(j.id)}
+      )
+
+    states =
+      Repo.all(
+        from(j in Oban.Job,
+          join: latest in subquery(latest),
+          on: j.id == latest.id,
+          select: j.state
+        )
+      )
+
     cond do
-      not eligible?(task) ->
-        if Repo.exists?(from(e in GoogleExport, where: e.task_id == ^task.id)),
-          do: job_status(task.id),
-          else: :not_required
-
-      not connected?(Accounts.get_user(task.assignee_id)) ->
-        :not_connected
-
-      true ->
-        case Repo.get_by(GoogleExport, task_id: task.id, user_id: task.assignee_id) do
-          %GoogleExport{payload_hash: hash} when is_binary(hash) ->
-            if hash == payload_hash(task), do: :synced, else: job_status(task.id)
-
-          _ ->
-            job_status(task.id)
-        end
+      "retryable" in states -> :retrying
+      Enum.any?(states, &(&1 in ["available", "scheduled", "executing"])) -> :pending
+      "discarded" in states -> :error
+      true -> :idle
     end
   end
+
+  def subscribe, do: Phoenix.PubSub.subscribe(To.PubSub, "google-sync")
+
+  def broadcast_status,
+    do: Phoenix.PubSub.broadcast(To.PubSub, "google-sync", {:sync_status, status()})
 
   def run(task_id) do
     task = Repo.get(Task, task_id)
@@ -51,15 +172,9 @@ defmodule To.Sync do
         if eligible?(task), do: export(task), else: :ok
       end
 
-    if task do
-      args = [To.PubSub, "tasks:#{task.list_id}", {:tasks_changed, task.list_id}]
-      apply(Phoenix.PubSub, :broadcast, args)
-
-      # Oban records retryable/discarded after perform returns; refresh that status afterward.
-      if match?({:error, _}, result) do
-        :timer.apply_after(1_000, Phoenix.PubSub, :broadcast, args)
-      end
-    end
+    # Oban records completion or retry after perform returns. Only the header
+    # needs updating; sync progress must not rerender the task forms.
+    :timer.apply_after(100, __MODULE__, :broadcast_status, [])
 
     result
   end
@@ -72,25 +187,18 @@ defmodule To.Sync do
   defp connected?(%User{google_refresh_token: token}), do: is_binary(token) && token != ""
   defp connected?(_), do: false
 
-  defp job_status(task_id) do
-    args = %{"task_id" => task_id}
-
-    state =
-      Repo.one(
-        from(j in Oban.Job,
-          where: j.worker == "To.SyncWorker" and j.args == ^args,
-          order_by: [desc: j.id],
-          limit: 1,
-          select: j.state
-        )
-      )
-
-    if state in ["retryable", "discarded"], do: :error, else: :pending
-  end
-
   defp remove_stale_exports(task, exports) do
     exports
-    |> Enum.reject(fn e -> eligible?(task) && e.user_id == task.assignee_id end)
+    |> Enum.reject(fn e ->
+      # An undated imported original must survive reconnecting, even though
+      # ordinary undated tasks are not exported.
+      imported_original =
+        task && !task.deleted_at && task.google_import_user_id == e.user_id &&
+          task.google_import_id == e.google_task_id
+
+      task && !task.deleted_at && (eligible?(task) || imported_original) &&
+        e.user_id == task.assignee_id && e.google_list_id == "@default"
+    end)
     |> Enum.reduce_while(:ok, fn e, :ok ->
       with user when not is_nil(user) <- Accounts.get_user(e.user_id),
            {:ok, token} <- Google.refresh_access_token(user),
@@ -109,8 +217,8 @@ defmodule To.Sync do
     if connected?(user) do
       with {:ok, token} <- Google.refresh_access_token(user) do
         case Repo.get_by(GoogleExport, task_id: task.id, user_id: user.id) do
-          nil -> create_export(task, user, token)
-          existing -> update_export(task, user, token, existing)
+          nil -> create_export(task, token)
+          existing -> update_export(task, token, existing)
         end
       end
     else
@@ -119,7 +227,7 @@ defmodule To.Sync do
     end
   end
 
-  defp update_export(task, user, token, existing) do
+  defp update_export(task, token, existing) do
     case request(
            :patch,
            task_path(existing.google_list_id, existing.google_task_id),
@@ -130,16 +238,17 @@ defmodule To.Sync do
         save_export(existing, task, existing.google_list_id, existing.google_task_id)
 
       {:error, {:google_status, 404}} ->
-        with {:ok, _} <- Repo.delete(existing), do: create_export(task, user, token)
+        with {:ok, _} <- Repo.delete(existing), do: create_export(task, token)
 
       error ->
         error
     end
   end
 
-  defp create_export(task, user, token) do
-    with {:ok, list_id} <- task_list(user, token),
-         {:ok, tasks} <-
+  defp create_export(task, token) do
+    list_id = "@default"
+
+    with {:ok, tasks} <-
            all_items("/lists/#{segment(list_id)}/tasks", token, %{
              showCompleted: true,
              showHidden: true,
@@ -155,35 +264,6 @@ defmodule To.Sync do
     case Enum.find(tasks, &String.ends_with?(&1["notes"] || "", marker(task))) do
       nil -> request(:post, "/lists/#{segment(list_id)}/tasks", token, payload(task))
       existing -> {:ok, existing}
-    end
-  end
-
-  defp task_list(user, token) do
-    case user.google_task_list_id do
-      nil ->
-        find_task_list(user, token)
-
-      id ->
-        case request(:get, "/users/@me/lists/#{segment(id)}", token) do
-          {:ok, _} -> {:ok, id}
-          {:error, {:google_status, 404}} -> find_task_list(user, token)
-          error -> error
-        end
-    end
-  end
-
-  defp find_task_list(user, token) do
-    with {:ok, lists} <- all_items("/users/@me/lists", token, %{maxResults: 1000}),
-         {:ok, list} <- existing_or_create_list(lists, token),
-         {:ok, _} <- Repo.update(User.changeset(user, %{google_task_list_id: list["id"]})) do
-      {:ok, list["id"]}
-    end
-  end
-
-  defp existing_or_create_list(lists, token) do
-    case Enum.find(lists, &(&1["title"] == "To")) do
-      nil -> request(:post, "/users/@me/lists", token, %{title: "To"})
-      list -> {:ok, list}
     end
   end
 
@@ -218,7 +298,7 @@ defmodule To.Sync do
     %{
       title: task.title,
       notes: (task.description || "") <> marker(task),
-      due: Date.to_iso8601(task.due_on) <> "T00:00:00Z",
+      due: if(task.due_on, do: Date.to_iso8601(task.due_on) <> "T00:00:00Z"),
       status: if(task.completed_at, do: "completed", else: "needsAction"),
       completed: if(task.completed_at, do: DateTime.to_iso8601(task.completed_at), else: nil)
     }
@@ -248,6 +328,7 @@ defmodule To.Sync do
     case Req.request(opts) do
       {:ok, %{status: status, body: response}} when status in 200..299 -> {:ok, response}
       {:ok, %{status: status}} when method == :delete and status in [404, 410] -> {:ok, %{}}
+      {:ok, %{status: 401}} -> {:error, :google_reconnect_required}
       {:ok, %{status: status}} -> {:error, {:google_status, status}}
       {:error, _} -> {:error, :google_unavailable}
     end

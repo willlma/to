@@ -34,7 +34,9 @@ const Notifications = {
         body: JSON.stringify({...subscription.toJSON(), time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone})
       });
       if (!response.ok) throw new Error("Could not save notifications. Check your connection and try again.");
-      this.status("Notifications enabled on this device.");
+      this.subscription = subscription;
+      this.el.textContent = "Test notification";
+      this.status("");
     };
     this.refresh = async () => {
       if (!this.supported() || Notification.permission !== "granted") return;
@@ -46,6 +48,16 @@ const Notifications = {
       if (!this.supported()) return;
       this.el.disabled = true;
       try {
+        if (this.subscription && Notification.permission === "granted") {
+          const response = await fetch("/api/push/test", {
+            method: "POST",
+            headers: {"Content-Type": "application/json", "x-csrf-token": csrf},
+            body: JSON.stringify({endpoint: this.subscription.endpoint})
+          });
+          if (!response.ok) throw new Error("Could not send the test notification. Check your connection and notification settings.");
+          this.status("Test notification sent.");
+          return;
+        }
         // Request permission directly in the click handler for iOS user activation.
         const permission = await Notification.requestPermission();
         if (permission !== "granted") {
@@ -84,7 +96,7 @@ const hooks = {
       this.title = this.el.querySelector("#task-title")
       this.position = () => {
         const rect = this.quick.getBoundingClientRect()
-        const top = Math.max(8, Math.min(rect.top, window.innerHeight - 150))
+        const top = rect.top
         Object.assign(this.el.style, {
           top: `${top}px`, left: `${rect.left}px`, width: `${rect.width}px`,
           maxHeight: `${Math.max(150, window.innerHeight - top - 8)}px`
@@ -106,11 +118,20 @@ const hooks = {
         this.title.dispatchEvent(new Event("input", {bubbles: true}))
       }
       this.cancel = () => {
-        this.form.reset()
-        this.quick.value = ""
+        this.quick.value = this.title.value
         this.el.close()
-        this.quick.focus()
-        this.pushEvent("cancel-task", {})
+        this.restoreFocus()
+      }
+      this.restoreFocus = () => {
+        this.quick.blur()
+        this.quick.focus({preventScroll: true})
+      }
+      this.closed = () => {
+        requestAnimationFrame(() => {
+          if (this.el.open) return
+          // WebKit can retain DOM focus after dismissal without accepting keys.
+          this.restoreFocus()
+        })
       }
       this.cancelEvent = event => { event.preventDefault(); this.cancel() }
       this.click = event => {
@@ -127,7 +148,9 @@ const hooks = {
         else this.form.requestSubmit()
       }
       this.quick.addEventListener("input", this.input)
+      this.quick.addEventListener("click", this.open)
       this.el.addEventListener("cancel", this.cancelEvent)
+      this.el.addEventListener("close", this.closed)
       this.el.addEventListener("click", this.click)
       this.el.addEventListener("keydown", this.keydown)
       window.addEventListener("resize", this.position)
@@ -136,12 +159,14 @@ const hooks = {
         this.form.reset()
         this.quick.value = ""
         this.el.close()
-        this.quick.focus()
+        this.restoreFocus()
       })
     },
     destroyed() {
       this.quick.removeEventListener("input", this.input)
+      this.quick.removeEventListener("click", this.open)
       this.el.removeEventListener("cancel", this.cancelEvent)
+      this.el.removeEventListener("close", this.closed)
       this.el.removeEventListener("click", this.click)
       this.el.removeEventListener("keydown", this.keydown)
       window.removeEventListener("resize", this.position)
@@ -149,7 +174,18 @@ const hooks = {
   },
   InlineTask: {
     mounted() {
+      this.handleEvent("confirm-task-delete", ({id, title}) => {
+        if (this.el.querySelector('[name="task_id"]').value !== String(id)) return
+        if (window.confirm(`Delete “${title}” and its details?`)) this.pushEvent("delete", {id})
+        else this.el.querySelector('.task-title').value = title
+      })
       this.keydown = event => {
+        if (event.key === "Enter" && !event.isComposing && event.target.matches('.task-title')) {
+          event.preventDefault()
+          if (event.shiftKey) this.el.querySelector('textarea').focus()
+          else document.getElementById('quick-title').focus()
+          return
+        }
         if (event.key === "Enter" && !event.shiftKey && !event.isComposing &&
           event.target.matches('input:not([type="date"]), textarea')) {
           event.preventDefault()
@@ -158,7 +194,13 @@ const hooks = {
       }
       this.click = event => {
         if (event.target.matches('input[type="date"]')) {
-          try { event.target.showPicker?.() } catch (_) { /* Native picker remains available. */ }
+          try {
+            if (event.target.showPicker) {
+              event.target.showPicker()
+              // Avoid also triggering the native indicator's default action.
+              event.preventDefault()
+            }
+          } catch (_) { /* Native picker remains available. */ }
         }
       }
       this.el.addEventListener("keydown", this.keydown)

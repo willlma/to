@@ -19,30 +19,33 @@ defmodule To.ReminderWorker do
           url: "/lists/#{task.list_id}"
         })
 
-      push = %ExNudge.Subscription{
-        endpoint: subscription.endpoint,
-        keys: %{p256dh: subscription.p256dh, auth: subscription.auth}
-      }
-
-      transport = transport()
-
-      case transport.send_notification(push, payload, ttl: 3600, topic: "task-#{task.id}") do
-        {:ok, _} ->
-          :ok
-
-        {:error, :subscription_expired} ->
-          Repo.delete(subscription)
-          :ok
-
-        {:error, {:http_error, 404}} ->
-          Repo.delete(subscription)
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
+      case send_notification(subscription, payload, ttl: 3600, topic: "task-#{task.id}") do
+        {:error, :subscription_expired} -> :ok
+        result -> result
       end
     else
       :ok
+    end
+  end
+
+  def send_notification(subscription, payload, opts) do
+    push = %ExNudge.Subscription{
+      endpoint: subscription.endpoint,
+      keys: %{p256dh: subscription.p256dh, auth: subscription.auth}
+    }
+
+    transport = transport()
+
+    case transport.send_notification(push, payload, opts) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} when reason in [:subscription_expired, {:http_error, 404}] ->
+        Repo.delete(subscription)
+        {:error, :subscription_expired}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

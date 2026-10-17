@@ -4,6 +4,7 @@ defmodule To.Tasks.List do
 
   schema "lists" do
     field(:name, :string)
+    field(:deleted_at, :utc_datetime)
     has_many(:tasks, To.Tasks.Task)
     timestamps(type: :utc_datetime)
   end

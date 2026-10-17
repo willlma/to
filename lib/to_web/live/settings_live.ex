@@ -4,7 +4,30 @@ defmodule ToWeb.SettingsLive do
 
   def mount(_params, _session, socket) do
     {:ok,
-     assign(socket, notice: nil, vapid_key: Application.get_env(:ex_nudge, :vapid_public_key))}
+     assign(socket,
+       notice: nil,
+       importing: false,
+       google_reconnect: false,
+       vapid_key: Application.get_env(:ex_nudge, :vapid_public_key)
+     )}
+  end
+
+  def handle_event("import-google", _, socket) do
+    user = socket.assigns.current_user
+
+    cond do
+      socket.assigns.importing ->
+        {:noreply, socket}
+
+      socket.assigns.google_reconnect || user.google_refresh_token in [nil, ""] ->
+        {:noreply, redirect(socket, to: ~p"/auth/google")}
+
+      true ->
+        {:noreply,
+         socket
+         |> assign(importing: true, notice: nil)
+         |> start_async(:google_import, fn -> To.Sync.import_tasks(user) end)}
+    end
   end
 
   def handle_event("reminder-time", %{"time" => time}, socket) do
@@ -16,6 +39,38 @@ defmodule ToWeb.SettingsLive do
         {:noreply, assign(socket, notice: "Choose a valid reminder time.")}
     end
   end
+
+  def handle_async(:google_import, {:ok, {:ok, counts}}, socket) do
+    notice =
+      "Imported #{counts.imported} tasks. Skipped #{counts.skipped} already imported or exported tasks."
+
+    notice =
+      if counts.invalid > 0,
+        do:
+          notice <>
+            " #{counts.invalid} tasks could not be imported because their data is unsupported.",
+        else: notice
+
+    {:noreply, assign(socket, importing: false, notice: notice)}
+  end
+
+  def handle_async(:google_import, {:ok, {:error, :google_reconnect_required}}, socket),
+    do:
+      {:noreply,
+       assign(socket,
+         importing: false,
+         google_reconnect: true,
+         notice:
+           "Google access has expired or was revoked. Reconnect to try importing again. Nothing was imported."
+       )}
+
+  def handle_async(:google_import, _, socket),
+    do:
+      {:noreply,
+       assign(socket,
+         importing: false,
+         notice: "Import failed. Please try again. Nothing was imported."
+       )}
 
   def render(assigns) do
     ~H"""
@@ -35,16 +90,21 @@ defmodule ToWeb.SettingsLive do
         id="enable-notifications"
         type="button"
         phx-hook="Notifications"
+        phx-update="ignore"
         data-vapid-key={@vapid_key || ""}
       >Enable notifications</button>
       <p id="notification-status" role="status" phx-update="ignore"></p>
-      <p>
-        {if @current_user.google_refresh_token in [nil, ""],
-          do: "Google not connected.",
-          else: "Google Tasks connected."}
-        <a href="/auth/google">Connect Google Tasks</a>
-      </p>
       <small>On iPhone, add To to your Home Screen before enabling notifications.</small>
+      <.form for={%{}} id="google-import-form" phx-submit="import-google">
+        <button disabled={@importing}>
+          {cond do
+            @importing -> "Importing…"
+            @google_reconnect -> "Reconnect to Google"
+            @current_user.google_refresh_token in [nil, ""] -> "Connect to Google"
+            true -> "Import Google Tasks"
+          end}
+        </button>
+      </.form>
       <.form for={%{}} action="/logout" method="delete"><button>Sign out</button></.form>
       <p :if={@notice} role="status">{@notice}</p>
     </main>

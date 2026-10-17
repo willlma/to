@@ -1,5 +1,7 @@
 .git
 .env*
+mise.local.toml
+tmp
 _build
 deps
 node_modules

@@ -33,6 +33,7 @@ defmodule ToWeb.Router do
   scope "/api/push", ToWeb do
     pipe_through [:browser, :authenticated]
     post "/subscriptions", PushController, :create
+    post "/test", PushController, :test_notification
     delete "/subscriptions", PushController, :delete
     patch "/preferences", PushController, :preferences
   end

@@ -28,3 +28,8 @@ Keep this codebase as small as possible. A very simple, ascetic UI is fine.
   then write the code.
 - Delete low-signal unit tests that would not catch a real bug missed by the
   end-to-end suite. Delegate independent cleanup areas to parallel subagents.
+
+# Deployment
+
+- To deploy: check, commit, push, and verify Fly's native auto-deploy.
+- No local deployments or GitHub Actions deployment workflows.
