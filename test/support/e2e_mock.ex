@@ -150,10 +150,15 @@ defmodule To.E2E.Mock do
 
   # Accept only the current encrypted Web Push wire format, so the browser
   # delivery flow catches invalid crypto keys, legacy encoding and broken HTTP.
+  # Apple also rejects Topic identifiers that cannot be decoded as base64url.
   post "/__encrypted_push" do
     {:ok, body, conn} = read_body(conn)
     encoding = List.first(get_req_header(conn, "content-encoding"))
     authorization = List.first(get_req_header(conn, "authorization")) || ""
+    topic = List.first(get_req_header(conn, "topic")) || ""
+
+    valid_topic =
+      byte_size(topic) in 1..32 && match?({:ok, _}, Base.url_decode64(topic, padding: false))
 
     vapid =
       String.starts_with?(authorization, "vapid t=") && String.contains?(authorization, ",k=")
@@ -172,7 +177,8 @@ defmodule To.E2E.Mock do
       encoding: encoding,
       vapid: vapid,
       encrypted_bytes: byte_size(body),
-      valid_encrypted_body: valid_body
+      valid_encrypted_body: valid_body,
+      valid_topic: valid_topic
     }
 
     Agent.update(
@@ -180,7 +186,7 @@ defmodule To.E2E.Mock do
       &Map.update!(&1, :encrypted_pushes, fn pushes -> pushes ++ [delivery] end)
     )
 
-    if encoding == "aes128gcm" && vapid && valid_body do
+    if encoding == "aes128gcm" && vapid && valid_body && valid_topic do
       send_resp(conn, 201, "")
     else
       json(conn, 400, %{error: "invalid encrypted push request"})

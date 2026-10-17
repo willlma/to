@@ -221,6 +221,9 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await expect(page.locator('#task-form')).toHaveCount(0);
   await expect(page.locator('#reminder-form')).toBeVisible();
   await expect(page.locator('#enable-notifications')).toHaveCSS('margin-top', '16px');
+  const importBounds = await page.getByRole('button', {name:'Import Google Tasks',exact:true}).boundingBox();
+  const signOutBounds = await page.getByRole('button', {name:'Sign out',exact:true}).boundingBox();
+  expect(signOutBounds.y - importBounds.y - importBounds.height).toBeGreaterThanOrEqual(12);
   await test.step('Enable notifications and send a test to this device', async () => {
     await page.getByRole('button', {name:'Enable notifications',exact:true}).click();
     await expect(page.getByRole('button', {name:'Test notification',exact:true})).toBeEnabled();
@@ -231,7 +234,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect.poll(async () => (await googleState(request)).pushes.filter(p => p.payload.title === 'Hello from town').length).toBe(1);
     const delivery = (await googleState(request)).pushes.find(p => p.payload.title === 'Hello from town');
     expect(delivery.endpoint).toBe(deviceSubscription.endpoint);
-    expect((await googleState(request)).encrypted_pushes.at(-1)).toMatchObject({vapid:true,valid_encrypted_body:true});
+    expect((await googleState(request)).encrypted_pushes.at(-1)).toMatchObject({vapid:true,valid_encrypted_body:true,valid_topic:true});
     await page.reload();
     await expect(page.getByRole('button', {name:'Test notification',exact:true})).toBeEnabled();
     await page.screenshot({path:'artifacts/e2e/test-notification.png',fullPage:true});
@@ -607,7 +610,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await request.post('http://127.0.0.1:4010/__run-reminder', {data:{title}});
   await expect.poll(async () => (await googleState(request)).pushes.find(p => p.payload.body === title)?.payload.title).toBe('Due tomorrow');
   const encryptedPush = (await googleState(request)).encrypted_pushes.at(-1);
-  expect(encryptedPush).toMatchObject({encoding:'aes128gcm', vapid:true, valid_encrypted_body:true});
+  expect(encryptedPush).toMatchObject({encoding:'aes128gcm', vapid:true, valid_encrypted_body:true,valid_topic:true});
   expect(encryptedPush.encrypted_bytes).toBeGreaterThan(103);
   await test.info().attach('encrypted-web-push', {body:JSON.stringify(encryptedPush,null,2), contentType:'application/json'});
   await row.getByRole('checkbox', {name: /^Complete /}).click();

@@ -1,5 +1,6 @@
 defmodule To.ReminderWorker do
   use Oban.Worker, queue: :reminders, max_attempts: 5
+  require Logger
   alias To.{PushSubscription, Repo}
   alias To.Accounts.User
   alias To.Tasks.Task
@@ -29,6 +30,13 @@ defmodule To.ReminderWorker do
   end
 
   def send_notification(subscription, payload, opts) do
+    # Apple decodes Topic as base64url; raw labels such as "test-notification"
+    # can be rejected. Use a stable encoded identifier within the 32-byte limit.
+    opts =
+      Keyword.update(opts, :topic, nil, fn topic ->
+        :crypto.hash(:sha256, topic) |> Base.url_encode64(padding: false) |> binary_part(0, 32)
+      end)
+
     push = %ExNudge.Subscription{
       endpoint: subscription.endpoint,
       keys: %{p256dh: subscription.p256dh, auth: subscription.auth}
@@ -43,6 +51,13 @@ defmodule To.ReminderWorker do
       {:error, reason} when reason in [:subscription_expired, {:http_error, 404}] ->
         Repo.delete(subscription)
         {:error, :subscription_expired}
+
+      {:error, {:http_error, status}} = error ->
+        Logger.warning(
+          "Web Push rejected by #{URI.parse(subscription.endpoint).host} (HTTP #{status})"
+        )
+
+        error
 
       {:error, reason} ->
         {:error, reason}

@@ -55,6 +55,7 @@ li button { grid-area: 1 / 5; padding: .2rem .3rem; border: 0; }
 .dragging { opacity: .45; }
 .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
 small, time { font-size: .8rem; opacity: .75; }
+#google-import-form { margin: 1rem 0; }
 .completed .task-title { text-decoration: line-through; opacity: .6; }
 .grouped { margin-left: .75rem; }
 form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
