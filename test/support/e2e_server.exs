@@ -3,14 +3,22 @@
 To.Accounts.ensure_household_users()
 [default | _] = To.Tasks.list_lists()
 will = Enum.find(To.Accounts.list_users(), &(&1.name == "Will"))
-{:ok, old} = To.Tasks.create_task(will, default.id, %{title: "Archived fixture"})
+# Completion regression cases: yesterday's completion belongs at the bottom,
+# while today's completion stays in its group even if it is hours old.
+today = DateTime.now!("America/Los_Angeles") |> DateTime.to_date()
+midnight = DateTime.new!(today, ~T[00:00:00], "America/Los_Angeles")
 
-old
-|> Ecto.Changeset.change(
-  completed_at:
-    DateTime.add(DateTime.utc_now() |> DateTime.truncate(:second), -25 * 3600, :second)
-)
-|> To.Repo.update!()
+for {title, completed_at} <- [
+      {"Archived fixture", DateTime.add(midnight, -1, :second)},
+      {"Recent completion fixture", midnight}
+    ] do
+  {:ok, task} =
+    To.Tasks.create_task(will, default.id, %{title: title, nested_under: "Housekeeping"})
+
+  task
+  |> Ecto.Changeset.change(completed_at: DateTime.shift_zone!(completed_at, "Etc/UTC"))
+  |> To.Repo.update!()
+end
 
 # Ephemeral keys exercise actual RFC 8291 encryption and VAPID signing against
 # the loopback receiver; no real provider credentials or devices are involved.

@@ -3,11 +3,13 @@ defmodule ToWeb.ListLive do
   alias To.{Accounts, Tasks}
   alias To.Tasks.Task
 
+  @completion_time_zone "America/Los_Angeles"
+
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Tasks.subscribe_lists()
       To.Sync.subscribe()
-      Process.send_after(self(), :refresh_completed, 60_000)
+      schedule_completed_refresh()
     end
 
     {:ok,
@@ -209,7 +211,7 @@ defmodule ToWeb.ListLive do
   end
 
   def handle_info(:refresh_completed, socket) do
-    Process.send_after(self(), :refresh_completed, 60_000)
+    schedule_completed_refresh()
     {:noreply, load_tasks(socket)}
   end
 
@@ -226,20 +228,37 @@ defmodule ToWeb.ListLive do
     end
   end
 
+  defp schedule_completed_refresh do
+    now = DateTime.now!(@completion_time_zone)
+
+    next_midnight =
+      now
+      |> DateTime.to_date()
+      |> Date.add(1)
+      |> DateTime.new!(~T[00:00:00], @completion_time_zone)
+
+    Process.send_after(
+      self(),
+      :refresh_completed,
+      DateTime.diff(next_midnight, now, :millisecond)
+    )
+  end
+
   defp load_tasks(socket) do
-    cutoff = DateTime.add(DateTime.utc_now(), -86_400, :second)
+    today = DateTime.now!(@completion_time_zone) |> DateTime.to_date()
+    cutoff = DateTime.new!(today, ~T[00:00:00], @completion_time_zone)
 
     tasks = Tasks.list_tasks(socket.assigns.list.id)
 
-    {old, current} =
+    {completed, current} =
       tasks
       |> Enum.split_with(fn task ->
-        task.completed_at && DateTime.compare(task.completed_at, cutoff) != :gt
+        task.completed_at && DateTime.before?(task.completed_at, cutoff)
       end)
 
     assign(socket,
       groups: groups(current),
-      old_tasks: old,
+      completed_tasks: completed,
       sync_status: To.Sync.status()
     )
   end
@@ -266,6 +285,17 @@ defmodule ToWeb.ListLive do
 
   defp date(nil), do: nil
   defp date(value), do: Date.to_iso8601(value)
+
+  defp date_label(value) do
+    format = if value.year == Date.utc_today().year, do: "%b %-d", else: "%b %-d, %Y"
+    Calendar.strftime(value, format)
+  end
+
+  defp overdue?(task),
+    do:
+      is_nil(task.completed_at) && task.due_on != nil &&
+        Date.before?(task.due_on, Date.utc_today())
+
   defp value(form, field), do: form[field].value
 
   defp errors(form),
@@ -297,11 +327,39 @@ defmodule ToWeb.ListLive do
 
   defp task_row(assigns) do
     ~H"""
+    <style :type={ToWeb.ColocatedCSS}>
+      [data-task-id] { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr) auto auto auto; align-items: center; column-gap: .25rem; padding: .1rem 0; }
+      [data-task-id] > input[type="checkbox"] { width: 1.1rem; height: 1.1rem; margin: 0; padding: 0; cursor: grab; touch-action: none; }
+      [data-task-id] > form { display: contents; }
+      [data-task-id] form > input, [data-task-id] textarea { width: 100%; min-width: 0; box-sizing: border-box; border: 0; padding: 0; }
+      .task-title { grid-area: 1 / 2; line-height: 1.2; }
+      [data-task-id] textarea { grid-area: 2 / 2; min-height: .9rem; height: .9rem; margin: 0; font-size: .75rem; line-height: 1.2; color: light-dark(#6b6b6b, #aaa); }
+      [data-task-id] textarea::placeholder { color: inherit; opacity: 1; }
+      .task-assignee { grid-area: 1 / 3; position: relative; margin: 0; }
+      .task-assignee select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
+      .task-assignee:has(select:focus-visible) .person-circle { border-color: light-dark(#706b60, #c4beae); }
+      .task-assignee span { pointer-events: none; }
+      .task-date { grid-area: 1 / 4; position: relative; display: flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; margin: 0; font-size: .72rem; }
+      .overdue .task-title, .overdue .task-date { color: light-dark(#9a3412, #fb923c); }
+      .task-date input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+      .task-date input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; cursor: pointer; }
+      .task-date:has(input:focus-visible) { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
+      .task-date span { white-space: nowrap; padding: 0 .15rem; pointer-events: none; }
+      .task-date svg { width: .9rem; height: .9rem; fill: none; stroke: currentColor; stroke-width: 1.5; pointer-events: none; }
+      [data-task-id] > small, [data-task-id] > p { grid-column: 1 / -1; margin: .25rem 0; }
+      [data-task-id] button { grid-area: 1 / 5; padding: .2rem .3rem; border: 0; }
+      .dragging { opacity: .45; }
+      .completed .task-title { text-decoration: line-through; opacity: .6; }
+      @media (max-width: 36rem) {
+        [data-task-id] textarea:focus { height: 5rem; }
+      }
+      [data-task-id] form > input:focus-visible, [data-task-id] textarea:focus-visible, [data-task-id] button:focus-visible { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
+    </style>
     <li
       id={"task-#{@task.id}"}
       data-task-id={@task.id}
       data-group={@task.nested_under || ""}
-      class={if @task.completed_at, do: "completed"}
+      class={[@task.completed_at && "completed", overdue?(@task) && "overdue"]}
     >
       <input
         type="checkbox"
@@ -316,7 +374,7 @@ defmodule ToWeb.ListLive do
       <.form
         for={%{}}
         id={"inline-task-#{@task.id}"}
-        phx-hook="InlineTask"
+        phx-hook=".InlineTask"
         phx-change="save-inline"
         phx-submit="save-inline"
       >
@@ -353,7 +411,7 @@ defmodule ToWeb.ListLive do
         </label>
         <label class="task-date" title={date(@task.due_on) || "Set due date"}>
           <input type="date" name="task[due_on]" value={date(@task.due_on)} aria-label="Due date" />
-          <span :if={@task.due_on}>{Calendar.strftime(@task.due_on, "%b %-d")}</span>
+          <span :if={@task.due_on}>{date_label(@task.due_on)}</span>
           <svg :if={is_nil(@task.due_on)} viewBox="0 0 24 24" aria-hidden="true">
             <path d="M7 3v4m10-4v4M4 10h16M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z" />
           </svg>
@@ -366,6 +424,47 @@ defmodule ToWeb.ListLive do
       >×</button>
       <p :for={error <- @errors} role="alert">{error}</p>
     </li>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".InlineTask">
+      export default {
+        mounted() {
+          this.handleEvent("confirm-task-delete", ({id, title}) => {
+            if (this.el.querySelector('[name="task_id"]').value !== String(id)) return
+            if (window.confirm(`Delete “${title}” and its details?`)) this.pushEvent("delete", {id})
+            else this.el.querySelector('.task-title').value = title
+          })
+          this.keydown = event => {
+            if (event.key === "Enter" && !event.isComposing && event.target.matches('.task-title')) {
+              event.preventDefault()
+              if (event.shiftKey) this.el.querySelector('textarea').focus()
+              else document.getElementById('quick-title').focus()
+              return
+            }
+            if (event.key === "Enter" && !event.shiftKey && !event.isComposing &&
+              event.target.matches('input:not([type="date"]), textarea')) {
+              event.preventDefault()
+              event.target.blur()
+            }
+          }
+          this.click = event => {
+            if (event.target.matches('input[type="date"]')) {
+              try {
+                if (event.target.showPicker) {
+                  event.target.showPicker()
+                  // Avoid also triggering the native indicator's default action.
+                  event.preventDefault()
+                }
+              } catch (_) { /* Native picker remains available. */ }
+            }
+          }
+          this.el.addEventListener("keydown", this.keydown)
+          this.el.addEventListener("click", this.click)
+        },
+        destroyed() {
+          this.el.removeEventListener("keydown", this.keydown)
+          this.el.removeEventListener("click", this.click)
+        }
+      }
+    </script>
     """
   end
 
@@ -376,7 +475,36 @@ defmodule ToWeb.ListLive do
 
   def render(assigns) do
     ~H"""
-    <main id="to-app" phx-hook="QuickEntry">
+    <style :type={ToWeb.ColocatedCSS}>
+      header, nav, #list-form, #task-form { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+      header { min-height: 2rem; flex-wrap: nowrap; }
+      header > a { text-decoration: none; flex-shrink: 0; }
+      header nav { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
+      nav > * { flex-shrink: 0; white-space: nowrap; }
+      nav button { border: 0; }
+      [aria-current="page"] { font-weight: bold; }
+      #quick-title, #task-title { width: 100%; box-sizing: border-box; }
+      #quick-title { margin: 1rem 0; }
+      #task-dialog { position: fixed; margin: 0; padding: 0; border: 0; max-width: none; }
+      #task-form { display: block; }
+      #task-form fieldset { border: 0; margin: 0; padding: 0; }
+      #task-form > [role="alert"] { flex-basis: 100%; margin: 0; }
+      .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
+      .grouped { margin-left: .75rem; }
+      form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
+      form[id^="group-"] button { border: 0; padding: .15rem .3rem; }
+      form[id^="group-"] input { border-color: transparent; font-weight: bold; width: auto; min-width: 0; max-width: calc(100% - 2rem); padding: .15rem 0; }
+      form[id^="group-"] input:focus { border-color: #aaa; }
+      #sync-status { width: 1.25rem; height: 1.25rem; flex-shrink: 0; }
+      #sync-status[data-state="idle"] { visibility: hidden; }
+      #sync-status svg { display: block; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transform-origin: center; }
+      #sync-status[data-state="pending"] svg, #sync-status[data-state="retrying"] svg { opacity: 0; animation: sync-appear 0s 1s forwards, sync-spin 1s linear 1s infinite; }
+      @keyframes sync-appear { to { opacity: 1; } }
+      @keyframes sync-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { #sync-status[data-state="pending"] svg, #sync-status[data-state="retrying"] svg { animation: sync-appear 0s 1s forwards; } }
+      nav button:focus-visible, form[id^="group-"] button:focus-visible { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
+    </style>
+    <main id="to-app" phx-hook=".QuickEntry">
       <header>
         <nav aria-label="Lists">
           <.link
@@ -439,7 +567,7 @@ defmodule ToWeb.ListLive do
       />
       <dialog
         id="task-dialog"
-        phx-hook="TaskDialog"
+        phx-hook=".TaskDialog"
         phx-mounted={JS.ignore_attributes(["open", "style"])}
         aria-label="New todo"
       >
@@ -505,6 +633,91 @@ defmodule ToWeb.ListLive do
           </fieldset>
         </.form>
       </dialog>
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".TaskDialog">
+        export default {
+          mounted() {
+            this.quick = document.getElementById("quick-title")
+            this.form = this.el.querySelector("form")
+            this.title = this.el.querySelector("#task-title")
+            this.position = () => {
+              const rect = this.quick.getBoundingClientRect()
+              const top = rect.top
+              Object.assign(this.el.style, {
+                top: `${top}px`, left: `${rect.left}px`, width: `${rect.width}px`,
+                maxHeight: `${Math.max(150, window.innerHeight - top - 8)}px`
+              })
+            }
+            this.open = () => {
+              this.position()
+              if (!this.el.open) this.el.showModal()
+              this.title.focus()
+            }
+            this.input = () => {
+              if (!this.quick.value) return
+              const value = this.quick.value
+              const start = this.quick.selectionStart
+              const end = this.quick.selectionEnd
+              this.title.value = value
+              this.open()
+              this.title.setSelectionRange(start, end)
+              this.title.dispatchEvent(new Event("input", {bubbles: true}))
+            }
+            this.cancel = () => {
+              this.quick.value = this.title.value
+              this.el.close()
+              this.restoreFocus()
+            }
+            this.restoreFocus = () => {
+              this.quick.blur()
+              this.quick.focus({preventScroll: true})
+            }
+            this.closed = () => {
+              requestAnimationFrame(() => {
+                if (this.el.open) return
+                // WebKit can retain DOM focus after dismissal without accepting keys.
+                this.restoreFocus()
+              })
+            }
+            this.cancelEvent = event => { event.preventDefault(); this.cancel() }
+            this.click = event => {
+              const rect = this.el.getBoundingClientRect()
+              const outside = event.target === this.el &&
+                (event.clientX < rect.left || event.clientX > rect.right ||
+                 event.clientY < rect.top || event.clientY > rect.bottom)
+              if (outside || event.target.closest("[data-cancel-task]")) this.cancel()
+            }
+            this.keydown = event => {
+              if (event.key !== "Enter" || event.isComposing || event.target !== this.title) return
+              event.preventDefault()
+              if (event.shiftKey) this.el.querySelector("#task-description").focus()
+              else this.form.requestSubmit()
+            }
+            this.quick.addEventListener("input", this.input)
+            this.quick.addEventListener("click", this.open)
+            this.el.addEventListener("cancel", this.cancelEvent)
+            this.el.addEventListener("close", this.closed)
+            this.el.addEventListener("click", this.click)
+            this.el.addEventListener("keydown", this.keydown)
+            window.addEventListener("resize", this.position)
+            this.handleEvent("open-task", () => this.open())
+            this.handleEvent("task-saved", () => {
+              this.form.reset()
+              this.quick.value = ""
+              this.el.close()
+              this.restoreFocus()
+            })
+          },
+          destroyed() {
+            this.quick.removeEventListener("input", this.input)
+            this.quick.removeEventListener("click", this.open)
+            this.el.removeEventListener("cancel", this.cancelEvent)
+            this.el.removeEventListener("close", this.closed)
+            this.el.removeEventListener("click", this.click)
+            this.el.removeEventListener("keydown", this.keydown)
+            window.removeEventListener("resize", this.position)
+          }
+        }
+      </script>
       <p :if={@groups == []}>Nothing to do.</p>
       <section
         :for={{group, items} <- @groups}
@@ -544,23 +757,119 @@ defmodule ToWeb.ListLive do
           />
         </ul>
       </section>
-      <details :if={@old_tasks != []} id="old-completed">
-        <summary>Old Completed Items ({length(@old_tasks)})</summary><ul>
+      <details :if={@completed_tasks != []} id="completed-tasks">
+        <summary>Completed ({length(@completed_tasks)})</summary><ul>
           <.task_row
-            :for={task <- @old_tasks}
+            :for={task <- @completed_tasks}
             task={task}
             users={@users}
             errors={@inline_errors[task.id] || []}
           />
         </ul>
       </details>
-      <dialog :if={@merge} id="merge-dialog" phx-hook="MergeDialog" aria-labelledby="merge-title">
+      <dialog :if={@merge} id="merge-dialog" phx-hook=".MergeDialog" aria-labelledby="merge-title">
         <h2 id="merge-title">Merge groups?</h2><p>
           “{@merge.name}” already exists. Combine “{@merge.old}” with it?
         </p>
         <button phx-click="merge">Merge groups</button><button phx-click="cancel-merge">Choose another name</button>
       </dialog>
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".MergeDialog">
+        export default {
+          mounted() {
+            this.el.showModal()
+            this.el.addEventListener("cancel", event => { event.preventDefault(); this.pushEvent("cancel-merge", {}) })
+          }
+        }
+      </script>
     </main>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".QuickEntry">
+      export default {
+        mounted() {
+          this.keydown = event => {
+            const title = document.getElementById("quick-title")
+            if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key) &&
+              event.target.matches('li > input[type="checkbox"]')) {
+              event.preventDefault()
+              const row = event.target.closest("li")
+              const groups = [...new Set([...this.el.querySelectorAll("[data-drop-group]")].map(el => el.dataset.dropGroup))]
+              const index = Math.max(0, Math.min(groups.length - 1,
+                groups.indexOf(row.dataset.group) + (event.key === "ArrowDown" ? 1 : -1)))
+              this.pushEvent("move-task", {id: row.dataset.taskId, group: groups[index]})
+            } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing &&
+              !event.target.closest('input, textarea, select, button, summary, a, [contenteditable], dialog')) {
+              title.focus()
+            }
+          }
+          window.addEventListener("keydown", this.keydown)
+          this.clearDrag = () => {
+            if (!this.drag) return
+            this.drag.row.classList.remove("dragging")
+            this.drag.target?.classList.remove("drop-target")
+            if (this.drag.grip.hasPointerCapture(this.drag.pointerId)) {
+              this.drag.grip.releasePointerCapture(this.drag.pointerId)
+            }
+            this.drag = null
+          }
+          this.pointerdown = event => {
+            this.skipClick = false
+            if (!event.isPrimary || event.button !== 0 || !event.target.matches('li > input[type="checkbox"]')) return
+            this.drag = {row: event.target.closest("li"), grip: event.target,
+              pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false}
+            event.target.setPointerCapture(event.pointerId)
+          }
+          this.pointermove = event => {
+            const drag = this.drag
+            if (!drag || event.pointerId !== drag.pointerId) return
+            if (!drag.active && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return
+            drag.active = true
+            event.preventDefault()
+            drag.row.classList.add("dragging")
+            const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-group]")
+            drag.target?.classList.remove("drop-target")
+            drag.target = this.el.contains(target) ? target : null
+            drag.target?.classList.add("drop-target")
+          }
+          this.pointerup = event => {
+            const drag = this.drag
+            if (!drag || event.pointerId !== drag.pointerId) return
+            if (drag.active) {
+              this.skipClick = true
+              if (event.type === "pointerup" && drag.target && drag.target.dataset.dropGroup !== drag.row.dataset.group) {
+                this.pushEvent("move-task", {id: drag.row.dataset.taskId, group: drag.target.dataset.dropGroup})
+              }
+            }
+            this.clearDrag()
+          }
+          this.click = event => {
+            if (this.skipClick && event.detail > 0) {
+              event.preventDefault()
+              event.stopImmediatePropagation()
+              this.skipClick = false
+            }
+          }
+          this.el.addEventListener("pointerdown", this.pointerdown)
+          this.el.addEventListener("pointermove", this.pointermove)
+          this.el.addEventListener("pointerup", this.pointerup)
+          this.el.addEventListener("pointercancel", this.pointerup)
+          this.el.addEventListener("click", this.click, true)
+          this.handleEvent("focus-group", ({name}) => {
+            const input = [...document.querySelectorAll("input[data-group]")].find(input => input.dataset.group === name)
+            if (input) { input.focus(); input.select() }
+          })
+        },
+        disconnected() { document.getElementById("connection-status").hidden = false },
+        reconnected() { document.getElementById("connection-status").hidden = true },
+        destroyed() {
+          this.clearDrag()
+          window.removeEventListener("keydown", this.keydown)
+          this.el.removeEventListener("pointerdown", this.pointerdown)
+          this.el.removeEventListener("pointermove", this.pointermove)
+          this.el.removeEventListener("pointerup", this.pointerup)
+          this.el.removeEventListener("pointercancel", this.pointerup)
+          this.el.removeEventListener("click", this.click, true)
+        }
+      }
+    </script>
     """
   end
 end

@@ -75,6 +75,7 @@ defmodule To.MixProject do
       "assets.setup": ["esbuild.install --if-missing"],
       "assets.build": ["compile", "esbuild to"],
       "assets.deploy": [
+        "compile",
         "esbuild to --minify",
         "phx.digest"
       ],

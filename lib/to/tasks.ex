@@ -55,11 +55,19 @@ defmodule To.Tasks do
   end
 
   def list_tasks(list_id) do
+    future_cutoff = Date.add(Date.utc_today(), 30)
+
     Repo.all(
       from(t in Task,
         where: t.list_id == ^list_id and is_nil(t.deleted_at),
         order_by: [
-          asc: fragment("? IS NULL", t.due_on),
+          asc:
+            fragment(
+              "CASE WHEN ? IS NULL THEN 1 WHEN ? > ? THEN 2 ELSE 0 END",
+              t.due_on,
+              t.due_on,
+              type(^future_cutoff, :date)
+            ),
           asc: t.due_on,
           asc: t.created_at,
           asc: t.id

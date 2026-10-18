@@ -100,10 +100,32 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await page.locator('#task-title').press('Enter');
   await expect(taskRow(page, 'Body typing')).toHaveCount(1);
   await expect(page.locator('#task-title')).toHaveValue('');
-  await expect(page.locator('#old-completed')).not.toHaveAttribute('open', '');
-  await page.locator('#old-completed > summary').click();
-  await expect(taskRow(page, 'Archived fixture')).toBeVisible();
-  await page.locator('#old-completed > summary').click();
+  await test.step('Separate completions at local midnight and restore reopened tasks', async () => {
+    const completed = page.locator('#completed-tasks');
+    const recent = taskRow(page, 'Recent completion fixture');
+    await expect(completed).not.toHaveAttribute('open', '');
+    await expect(completed.locator('[data-task-id]')).toHaveCount(1);
+    await expect(completed.locator('summary')).toHaveText('Completed (1)');
+    await expect(page.locator('#completed-tasks ~ section')).toHaveCount(0);
+    await expect(recent).toBeVisible();
+    await expect(recent.getByRole('checkbox')).toBeChecked();
+    await expect(page.locator('section[data-drop-group="Housekeeping"]').locator('[data-task-id]')).toHaveCount(1);
+    await completed.locator('summary').click();
+    const archived = taskRow(page, 'Archived fixture');
+    await expect(archived).toBeVisible();
+    await page.screenshot({path:'artifacts/e2e/completed-section.png', fullPage:true});
+    await archived.getByRole('checkbox').uncheck();
+    await expect(completed).toHaveCount(0);
+    await expect(page.locator('section[data-drop-group="Housekeeping"]').locator('[data-task-id]')).toHaveCount(2);
+    await expect(archived.getByRole('checkbox')).not.toBeChecked();
+    await page.reload();
+    await expect(archived).toBeVisible();
+    await expect(archived.getByRole('checkbox')).not.toBeChecked();
+    // Completing again keeps the task in place until the next local midnight.
+    await archived.getByRole('checkbox').check();
+    await expect(archived).toBeVisible();
+    await expect(completed).toHaveCount(0);
+  });
 
   const nicoleContext = await browser.newContext({viewport:{width:390,height:844}, isMobile:true, hasTouch:true});
   const nicole = await nicoleContext.newPage();
@@ -145,9 +167,47 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await createTask(page, 'Later ungrouped', {due:'2030-05-04'});
   const titles = await page.locator('[data-task-id] input[name="task[title]"]').evaluateAll(inputs => inputs.map(input => input.value));
   expect(titles.findIndex(t => t.includes('Earlier ungrouped'))).toBeLessThan(titles.findIndex(t => t.includes('Later ungrouped')));
-  expect(titles.findIndex(t => t.includes('Later ungrouped'))).toBeLessThan(titles.findIndex(t => t.includes('No due date')));
+  expect(titles.findIndex(t => t.includes('No due date'))).toBeLessThan(titles.findIndex(t => t.includes('Later ungrouped')));
   expect(titles.findIndex(t => t.includes('No due date'))).toBeLessThan(titles.findIndex(t => t.includes('Friday groceries')));
   expect(titles.findIndex(t => t.includes('No due date'))).toBeLessThan(titles.findIndex(t => t.includes('Thursday produce')));
+
+  await test.step('Show years, highlight overdue tasks, and put distant dates after undated tasks', async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const year = Number(today.slice(0, 4));
+    const offsetDate = days => {
+      const date = new Date(today + 'T12:00:00Z');
+      date.setUTCDate(date.getUTCDate() + days);
+      return date.toISOString().slice(0, 10);
+    };
+    const fixtures = [
+      ['Previous year', `${year - 1}-06-15`],
+      ['Current year', `${year}-06-15`],
+      ['Next year', `${year + 1}-06-15`],
+      ['Yesterday', offsetDate(-1)],
+      ['Today', today],
+      ['Within 30 days', offsetDate(30)],
+      ['Beyond 30 days', offsetDate(31)]
+    ];
+    for (const [title, due] of fixtures) await createTask(page, title, {due});
+    await expect(taskRow(page, 'Previous year').locator('.task-date span')).toHaveText(`Jun 15, ${year - 1}`);
+    await expect(taskRow(page, 'Current year').locator('.task-date span')).toHaveText('Jun 15');
+    await expect(taskRow(page, 'Next year').locator('.task-date span')).toHaveText(`Jun 15, ${year + 1}`);
+    const yesterday = taskRow(page, 'Yesterday');
+    await expect(yesterday).toHaveClass(/overdue/);
+    await expect(taskRow(page, 'Today')).not.toHaveClass(/overdue/);
+    await page.emulateMedia({colorScheme:'light'});
+    await expect(yesterday.locator('.task-date')).toHaveCSS('color', 'rgb(154, 52, 18)');
+    await page.emulateMedia({colorScheme:'dark'});
+    await expect(yesterday.locator('.task-date')).toHaveCSS('color', 'rgb(251, 146, 60)');
+    await page.emulateMedia({colorScheme:'light'});
+    const ordered = await page.locator('[data-task-id] input[name="task[title]"]').evaluateAll(inputs => inputs.map(input => input.value));
+    expect(ordered.indexOf('Within 30 days')).toBeLessThan(ordered.indexOf('No due date'));
+    expect(ordered.indexOf('No due date')).toBeLessThan(ordered.indexOf('Beyond 30 days'));
+    await yesterday.getByRole('checkbox').check();
+    await expect(yesterday).not.toHaveClass(/overdue/);
+    await page.screenshot({path:'artifacts/e2e/deadlines.png', fullPage:true});
+    for (const [title] of fixtures) await taskRow(page, title).getByRole('button', {name:`Delete ${title}`, exact:true}).click();
+  });
 
   // Moving groups must persist across browsers, preserve completion and keep due-date sorting.
   const inGroup = (tab, group) => tab.locator('section').filter({has:tab.locator('input[data-group=' + JSON.stringify(group) + ']')});
@@ -315,7 +375,6 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
       await expect(taskRow(nicole, title)).toHaveCount(0);
     }
     await expect(dated.getByRole('combobox', {name:'Assignee'}).locator('option:checked')).toHaveText('Will');
-    await nicole.locator('#old-completed > summary').click();
     await expect(taskRow(nicole, 'Google task already completed')).toHaveCount(0);
 
     await request.patch(`${source}/${originals[0].id}`, {headers:willAuth,data:{title:'Changed only in Google'}});

@@ -29,6 +29,12 @@ The explicit development login option provides Nicole/Will links without Google
 credentials. It is absent from production builds. Normal Google sign-in requires
 all five OAuth settings below. `mix setup` is also available on a standard machine.
 
+Component hooks and styles are colocated in HEEx using LiveView 1.2. `app.js`
+imports the generated hook and CSS manifests and starts LiveSocket; `app.css`
+contains shared element defaults. `ToWeb.ColocatedCSS` extracts styles without
+rewriting selectors; component styles use their existing classes and IDs.
+Compile before bundling assets so LiveView can generate both manifests.
+
 ## Behavior
 
 - Shared named lists; the first is **To do**.
@@ -48,8 +54,8 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
   tasks with a description, date, assignee, group, or completion require confirmation
   when deleted by clearing the title. Cancel restores the title.
   The assignee circle opens the native selector, and clicking the date opens the
-  native picker. Dates display compactly as **May 3**; the full date, including
-  year, remains in the picker and hover tooltip. Undated tasks show only a
+  native picker. Dates display compactly as **May 3**, adding the year when it differs from
+  the current year; the full date remains in the picker and hover tooltip. Undated tasks show only a
   calendar icon. Assignees show W or N in an outlined circle; unassigned tasks
   show the same circle empty.
   Drag from a task's checkbox to a group to move it, or to the current list link to
@@ -60,14 +66,21 @@ all five OAuth settings below. `mix setup` is also available on a standard machi
   with the description immediately below the title.
 - Tasks have a required title and optional description, date-only `due_on`,
   assignee Nicole or Will, and a plain-string group (`nested_under`).
-- Ungrouped tasks appear before named groups. Within each section, dated tasks
-  precede undated tasks. Groups stay together, ordered by their first due task;
-  each group's tasks sort by due date. Equal dates use creation time/id.
-  No position column; undated ordering is provisional.
+- Ungrouped tasks appear before named groups. Within each section, overdue tasks and
+  dates within the next 30 days precede undated tasks; dates more than 30 days away
+  follow undated tasks. Groups stay together, ordered by their first task in this order;
+  each group's tasks use the same deadline ordering. Equal dates use creation time/id.
+  Dates outside the current UTC year include the year. Incomplete overdue tasks
+  use dark orange, with a lighter shade in dark mode. No position column; undated
+  ordering is provisional.
 - Group names save after a pause or on blur. A collision opens a merge-or-rename
   dialog. Clearing a name ungroups its tasks.
-- Completion remains in place for 24 hours, then appears in **Old Completed Items**
-  in the original list. This is a view, not a database move.
+- Tasks completed today remain in place until midnight in America/Los_Angeles,
+  then move into a collapsed **Completed** section at the end of their original
+  list. Open lists schedule one refresh for the next midnight, including daylight
+  saving changes; opening a list also recalculates the section. There is no minute
+  polling. Reopening restores the task to its group and deadline order; completing
+  again keeps it in place until the next midnight. Tasks are not deleted.
 - Actor IDs and creation/update timestamps are stored. No version-history table.
 - Google sync is **one way**: eligible assigned, dated tasks from every app list
   go to that person's existing default Google Tasks list. App lists are not
