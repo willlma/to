@@ -103,6 +103,27 @@ defmodule To.Tasks do
     |> write(:update)
   end
 
+  def move_task(actor, %Task{} = task, list_id) do
+    case get_list(list_id) do
+      nil ->
+        {:error, :list_not_found}
+
+      %List{id: id} when id == task.list_id ->
+        {:ok, task}
+
+      %List{id: id} ->
+        result =
+          task
+          |> Task.changeset(%{nested_under: nil})
+          |> Changeset.put_change(:list_id, id)
+          |> Changeset.put_change(:updated_by_id, actor_id!(actor))
+          |> write(:update)
+
+        if match?({:ok, _}, result), do: broadcast(task.list_id)
+        result
+    end
+  end
+
   def toggle_task(actor, %Task{} = task) do
     task
     |> Changeset.change(completed_at: if(task.completed_at, do: nil, else: now()))

@@ -42,8 +42,9 @@ Compile before bundling assets so LiveView can generate both manifests.
   tasks for both people, cancels reminders, and queues deletion of their Google
   copies. The last remaining list cannot be deleted.
 - Typing outside another control focuses quick entry. Starting a todo opens a
-  native dialog over the list without moving existing todos. Enter saves from
-  the title; Shift+Enter focuses the description. Escape, Cancel, or clicking outside
+  full-screen native dialog that hides the todos. Add sits beside the title, and
+  the title requests a Done keyboard action on phones. Enter saves from the
+  title; Shift+Enter focuses the description. Escape or Cancel
   collapses the details and keeps the draft; resuming typing opens it again.
   The plus beside a group opens the same dialog with that group filled in.
 - Click a task's title or description to edit inline; blur or Enter saves.
@@ -58,9 +59,11 @@ Compile before bundling assets so LiveView can generate both manifests.
   the current year; the full date remains in the picker and hover tooltip. Undated tasks show only a
   calendar icon. Assignees show W or N in an outlined circle; unassigned tasks
   show the same circle empty.
-  Drag from a task's checkbox to a group to move it, or to the current list link to
-  ungroup it. With the checkbox focused, Alt+Up/Down moves between groups.
-  Moving changes the group; tasks still sort by due date.
+  Drag from a task's checkbox to a group to change its group, or outside the group
+  into the task area, the No group drop area, or the current list link to ungroup it.
+  Drop on another list link to move it to that list and clear its group, preserving
+  the task's other details. With the checkbox focused, Alt+Up/Down moves between
+  groups; Alt+Left/Right moves between lists. Tasks still sort by due date.
 - Your initial in a circle opens a separate settings page with sign-out. The list-name form stays hidden until
   you click the plus beside the lists. Controls share one compact row on phones,
   with the description immediately below the title.

@@ -209,6 +209,29 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     for (const [title] of fixtures) await taskRow(page, title).getByRole('button', {name:`Delete ${title}`, exact:true}).click();
   });
 
+  await test.step('Move between lists without losing task details', async () => {
+    const transfer = await createTask(page, 'Transfer details', {
+      description:'Keep these notes', due:'2030-05-03', assignee:'Nicole', group:'Dairy'
+    });
+    const source = page.getByRole('link', {name:'To do', exact:true});
+    await transfer.getByRole('checkbox').dragTo(source);
+    await expect(transfer).toHaveCount(0);
+    await expect(taskRow(nicole, 'Transfer details')).toHaveCount(0);
+    await source.click();
+    const moved = taskRow(page, 'Transfer details');
+    await expect(moved).toHaveAttribute('data-group', '');
+    await expect(moved.getByLabel('Description', {exact:true})).toHaveValue('Keep these notes');
+    await expect(moved.getByLabel('Due date', {exact:true})).toHaveValue('2030-05-03');
+    await expect(moved.getByLabel('Assignee', {exact:true}).locator('option:checked')).toHaveText('Nicole');
+    await expect(moved.getByRole('checkbox')).not.toBeChecked();
+    await moved.getByRole('checkbox').press('Alt+ArrowRight');
+    await expect(moved).toHaveCount(0);
+    await page.getByRole('link', {name:'Groceries', exact:true}).click();
+    await expect(transfer).toBeVisible();
+    await expect(taskRow(nicole, 'Transfer details')).toBeVisible();
+    await transfer.getByRole('button', {name:'Delete Transfer details',exact:true}).click();
+  });
+
   // Moving groups must persist across browsers, preserve completion and keep due-date sorting.
   const inGroup = (tab, group) => tab.locator('section').filter({has:tab.locator('input[data-group=' + JSON.stringify(group) + ']')});
   await plain.getByRole('checkbox').dragTo(page.locator('input[data-group="Dairy"]'));
@@ -218,7 +241,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await expect(inGroup(nicole, 'Produce').locator('[data-task-id]').filter({has:nicole.locator('input[value="Friday groceries"]')})).toBeVisible();
   await friday.getByRole('checkbox').dragTo(page.locator('input[data-group="Dairy"]'));
   await expect(inGroup(page, 'Dairy').locator('input[value="Friday groceries"]')).toBeVisible();
-  await plain.getByRole('checkbox').dragTo(page.getByRole('link', {name:'Groceries', exact:true}));
+  await plain.getByRole('checkbox').dragTo(page.locator('#ungroup-target'));
   await expect(plain).toHaveAttribute('data-group', '');
   // The same move is available to keyboard users without another menu.
   await plain.getByRole('checkbox').press('Alt+ArrowDown');
@@ -500,11 +523,10 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await expect(plain.getByRole('textbox', {name:'Description', exact:true})).not.toHaveAttribute('placeholder');
   await page.screenshot({path:'artifacts/e2e/mobile-list.png', fullPage:true});
 
-  await test.step('Preserve the draft and dialog position', async () => {
+  await test.step('Preserve the draft in a full-screen dialog', async () => {
     const row = milkRow;
     const before = await row.boundingBox();
     const quick = page.locator('#quick-title');
-    const anchor = await quick.boundingBox();
     await expect(page.getByRole('button', {name:'Add', exact:true})).toBeHidden();
     await quick.fill('Typing opens details');
     const dialog = page.getByRole('dialog', {name:'New todo'});
@@ -512,14 +534,15 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(page.locator('#task-title')).toHaveValue('Typing opens details');
     await expect(page.locator('#task-title')).toBeFocused();
     await expect(page.locator('#task-description')).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).toEqual({x:0, y:0, ...page.viewportSize()});
+    await expect(page.locator('#task-title')).toHaveAttribute('enterkeyhint', 'done');
+    const add = await dialog.getByRole('button', {name:'Add', exact:true}).boundingBox();
     const titleBounds = await page.locator('#task-title').boundingBox();
-    for (const dimension of ['x', 'y', 'width', 'height']) {
-      expect(Math.abs(titleBounds[dimension] - anchor[dimension])).toBeLessThan(1);
-    }
+    expect(Math.abs(add.y - titleBounds.y)).toBeLessThan(2);
     expect(await dialog.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(await page.locator('body').evaluate(el => getComputedStyle(el).backgroundColor));
     expect(await dialog.evaluate(el => getComputedStyle(el, '::backdrop').backgroundColor)).toBe('rgba(0, 0, 0, 0)');
     expect((await row.boundingBox()).y).toBe(before.y);
-    expect(Math.abs((await dialog.boundingBox()).y - anchor.y)).toBeLessThan(2);
     await page.locator('#task-description').fill('Keep this draft');
     await page.locator('#task-due').fill('2030-09-01');
     await page.locator('#task-assignee').selectOption({label:'Will'});
@@ -559,46 +582,39 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(taskRow(page, 'Added via group')).toHaveAttribute('data-group', 'Produce');
     await quick.fill('Next todo');
     await expect(page.locator('#task-group')).toHaveValue('');
-    await page.locator('#task-description').fill('Retained after cancel and outside click');
+    await page.locator('#task-description').fill('Retained after cancel');
     await page.locator('#task-group').fill('Draft group');
     await page.getByRole('button', {name:'Cancel', exact:true}).click();
     await expect(dialog).toBeHidden();
     await expect(quick).toBeFocused();
     await expect(quick).toHaveValue('Next todo');
-    await quick.fill('Outside click draft');
-    await expect(page.locator('#task-description')).toHaveValue('Retained after cancel and outside click');
+    await quick.fill('Cancelled draft');
+    await expect(page.locator('#task-description')).toHaveValue('Retained after cancel');
     await expect(page.locator('#task-group')).toHaveValue('Draft group');
     await dialog.click({position:{x:2,y:2}});
     await expect(dialog).toBeVisible();
-    await page.mouse.click(2, 2);
+    await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
     await expect(dialog).toBeHidden();
-    await expect(quick).toHaveValue('Outside click draft');
+    await expect(quick).toHaveValue('Cancelled draft');
     await expect(quick).toBeFocused();
     // Real typing must work after dismissal, without focusing a locator first.
     await page.keyboard.type(' resumed');
     await expect(dialog).toBeVisible();
-    await expect(page.locator('#task-title')).toHaveValue('Outside click draft resumed');
-    await page.mouse.click(2, 2);
+    await expect(page.locator('#task-title')).toHaveValue('Cancelled draft resumed');
+    await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
     await expect(dialog).toBeHidden();
     await expect(quick).toBeFocused();
     await page.setViewportSize({width:390,height:844});
-    const phoneAnchor = await quick.boundingBox();
     await page.emulateMedia({colorScheme:'dark'});
     await quick.fill('Phone draft');
     await expect(dialog).toBeVisible();
     expect(await page.locator('#task-assignee').evaluate(el => getComputedStyle(el).backgroundColor)).toBe(await dialog.evaluate(el => getComputedStyle(el).backgroundColor));
-    await expect(page.locator('#task-description')).toHaveValue('Retained after cancel and outside click');
+    await expect(page.locator('#task-description')).toHaveValue('Retained after cancel');
     await expect(page.locator('#task-group')).toHaveValue('Draft group');
-    const bounds = await dialog.boundingBox();
-    expect(bounds.x).toBeGreaterThanOrEqual(0);
-    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
-    const phoneTitle = await page.locator('#task-title').boundingBox();
-    for (const dimension of ['x', 'y', 'width', 'height']) {
-      expect(Math.abs(phoneTitle[dimension] - phoneAnchor[dimension])).toBeLessThan(1);
-    }
+    expect(await dialog.boundingBox()).toEqual({x:0,y:0,width:390,height:844});
     await page.screenshot({path:'artifacts/e2e/stable-task-dialog.png', fullPage:true});
     await page.locator('#task-title').press('Enter');
-    await expect(taskRow(page, 'Phone draft').getByRole('textbox', {name:'Description', exact:true})).toHaveValue('Retained after cancel and outside click');
+    await expect(taskRow(page, 'Phone draft').getByRole('textbox', {name:'Description', exact:true})).toHaveValue('Retained after cancel');
     await expect(taskRow(page, 'Phone draft')).toHaveAttribute('data-group', 'Draft group');
     await expect(quick).toHaveValue('');
     await expect(quick).toBeFocused();

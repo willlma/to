@@ -125,6 +125,11 @@ defmodule ToWeb.ListLive do
      result(socket, Tasks.update_task(socket.assigns.current_user, task, %{nested_under: group}))}
   end
 
+  def handle_event("move-to-list", %{"id" => id, "list_id" => list_id}, socket) do
+    task = Tasks.get_task!(socket.assigns.list.id, id)
+    {:noreply, result(socket, Tasks.move_task(socket.assigns.current_user, task, list_id))}
+  end
+
   def handle_event(
         "save-inline",
         %{"task_id" => id, "task" => attrs, "_target" => ["task", field]},
@@ -366,7 +371,7 @@ defmodule ToWeb.ListLive do
         checked={@task.completed_at != nil}
         phx-click="toggle"
         phx-value-id={@task.id}
-        title="Click to complete; drag to a group. Alt + arrow keys move between groups."
+        title="Click to complete; drag to a group or list. Alt + Up/Down changes group; Alt + Left/Right changes list."
         aria-label={
           if @task.completed_at, do: "Reopen #{@task.title}", else: "Complete #{@task.title}"
         }
@@ -476,33 +481,39 @@ defmodule ToWeb.ListLive do
   def render(assigns) do
     ~H"""
     <style :type={ToWeb.ColocatedCSS}>
-      header, nav, #list-form, #task-form { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
-      header { min-height: 2rem; flex-wrap: nowrap; }
-      header > a { text-decoration: none; flex-shrink: 0; }
-      header nav { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
-      nav > * { flex-shrink: 0; white-space: nowrap; }
-      nav button { border: 0; }
-      [aria-current="page"] { font-weight: bold; }
-      #quick-title, #task-title { width: 100%; box-sizing: border-box; }
-      #quick-title { margin: 1rem 0; }
-      #task-dialog { position: fixed; margin: 0; padding: 0; border: 0; max-width: none; }
-      #task-form { display: block; }
-      #task-form fieldset { border: 0; margin: 0; padding: 0; }
-      #task-form > [role="alert"] { flex-basis: 100%; margin: 0; }
-      .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
-      .grouped { margin-left: .75rem; }
-      form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
-      form[id^="group-"] button { border: 0; padding: .15rem .3rem; }
-      form[id^="group-"] input { border-color: transparent; font-weight: bold; width: auto; min-width: 0; max-width: calc(100% - 2rem); padding: .15rem 0; }
-      form[id^="group-"] input:focus { border-color: #aaa; }
-      #sync-status { width: 1.25rem; height: 1.25rem; flex-shrink: 0; }
-      #sync-status[data-state="idle"] { visibility: hidden; }
-      #sync-status svg { display: block; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transform-origin: center; }
-      #sync-status[data-state="pending"] svg, #sync-status[data-state="retrying"] svg { opacity: 0; animation: sync-appear 0s 1s forwards, sync-spin 1s linear 1s infinite; }
-      @keyframes sync-appear { to { opacity: 1; } }
-      @keyframes sync-spin { to { transform: rotate(360deg); } }
-      @media (prefers-reduced-motion: reduce) { #sync-status[data-state="pending"] svg, #sync-status[data-state="retrying"] svg { animation: sync-appear 0s 1s forwards; } }
-      nav button:focus-visible, form[id^="group-"] button:focus-visible { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
+        header, nav, #list-form, #task-form { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+        header { min-height: 2rem; flex-wrap: nowrap; }
+        header > a { text-decoration: none; flex-shrink: 0; }
+        header nav { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
+        nav > * { flex-shrink: 0; white-space: nowrap; }
+        nav button { border: 0; }
+        [aria-current="page"] { font-weight: bold; }
+        #quick-title, #task-title { width: 100%; box-sizing: border-box; }
+        #quick-title { margin: 1rem 0; }
+        #task-dialog { position: fixed; inset: 0; box-sizing: border-box; margin: 0; padding: 1rem .5rem; border: 0; border-radius: 0; width: 100%; height: 100dvh; max-width: none; max-height: none; overflow-y: auto; }
+      #task-form { display: block; max-width: 44rem; margin: 0 auto; }
+      .task-entry { display: flex; align-items: center; gap: .5rem; }
+      .task-entry input { flex: 1; min-width: 0; }
+      .task-entry button { flex-shrink: 0; }
+      body:has(#task-dialog[open]) { overflow: hidden; }
+      #ungroup-target { padding: .5rem 0; font-size: .8rem; color: light-dark(#6b6b6b, #aaa); }
+      .dragging-task #ungroup-target { outline: 1px dashed #888; }
+        #task-form fieldset { border: 0; margin: 0; padding: 0; }
+        #task-form > [role="alert"] { flex-basis: 100%; margin: 0; }
+        .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
+        .grouped { margin-left: .75rem; }
+        form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
+        form[id^="group-"] button { border: 0; padding: .15rem .3rem; }
+        form[id^="group-"] input { border-color: transparent; font-weight: bold; width: auto; min-width: 0; max-width: calc(100% - 2rem); padding: .15rem 0; }
+        form[id^="group-"] input:focus { border-color: #aaa; }
+        #sync-status { width: 1.25rem; height: 1.25rem; flex-shrink: 0; }
+        #sync-status[data-state="idle"] { visibility: hidden; }
+        #sync-status svg { display: block; width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transform-origin: center; }
+        #sync-status[data-state="pending"] svg, #sync-status[data-state="retrying"] svg { opacity: 0; animation: sync-appear 0s 1s forwards, sync-spin 1s linear 1s infinite; }
+        @keyframes sync-appear { to { opacity: 1; } }
+        @keyframes sync-spin { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) { #sync-status[data-state="pending"] svg, #sync-status[data-state="retrying"] svg { animation: sync-appear 0s 1s forwards; } }
+        nav button:focus-visible, form[id^="group-"] button:focus-visible { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
     </style>
     <main id="to-app" phx-hook=".QuickEntry">
       <header>
@@ -511,8 +522,13 @@ defmodule ToWeb.ListLive do
             :for={list <- @lists}
             patch={~p"/lists/#{list.id}"}
             aria-current={if list.id == @list.id, do: "page"}
+            data-drop-list={list.id}
             data-drop-group={if list.id == @list.id, do: ""}
-            title={if list.id == @list.id, do: "Drop a task here to remove its group"}
+            title={
+              if list.id == @list.id,
+                do: "Drop a task here to remove its group",
+                else: "Drop a task here to move it to #{list.name}"
+            }
           >{list.name}</.link>
           <button
             type="button"
@@ -563,27 +579,32 @@ defmodule ToWeb.ListLive do
         aria-label="Task title"
         autocomplete="off"
         maxlength="300"
+        enterkeyhint="done"
         autofocus
       />
       <dialog
         id="task-dialog"
         phx-hook=".TaskDialog"
-        phx-mounted={JS.ignore_attributes(["open", "style"])}
+        phx-mounted={JS.ignore_attributes(["open"])}
         aria-label="New todo"
       >
         <.form for={@form} id="task-form" phx-change="validate" phx-submit="create">
-          <input
-            id="task-title"
-            aria-describedby="task-title-errors"
-            name="task[title]"
-            value={value(@form, :title)}
-            placeholder="Start typing a task…"
-            aria-label="Task title"
-            required
-            maxlength="300"
-            phx-debounce="300"
-            autocomplete="off"
-          />
+          <div class="task-entry">
+            <input
+              id="task-title"
+              aria-describedby="task-title-errors"
+              name="task[title]"
+              value={value(@form, :title)}
+              placeholder="Start typing a task…"
+              aria-label="Task title"
+              required
+              maxlength="300"
+              phx-debounce="300"
+              autocomplete="off"
+              enterkeyhint="done"
+            />
+            <button type="submit" phx-disable-with="Adding…">Add</button>
+          </div>
           <.field_errors field={@form[:title]} id="task-title-errors" label="Todo" />
           <fieldset>
             <label>Description<textarea
@@ -628,7 +649,6 @@ defmodule ToWeb.ListLive do
               phx-debounce="300"
             /></label>
             <.field_errors field={@form[:nested_under]} id="task-group-errors" label="Group" />
-            <button>Add</button>
             <button type="button" data-cancel-task>Cancel</button>
           </fieldset>
         </.form>
@@ -639,16 +659,7 @@ defmodule ToWeb.ListLive do
             this.quick = document.getElementById("quick-title")
             this.form = this.el.querySelector("form")
             this.title = this.el.querySelector("#task-title")
-            this.position = () => {
-              const rect = this.quick.getBoundingClientRect()
-              const top = rect.top
-              Object.assign(this.el.style, {
-                top: `${top}px`, left: `${rect.left}px`, width: `${rect.width}px`,
-                maxHeight: `${Math.max(150, window.innerHeight - top - 8)}px`
-              })
-            }
             this.open = () => {
-              this.position()
               if (!this.el.open) this.el.showModal()
               this.title.focus()
             }
@@ -680,11 +691,7 @@ defmodule ToWeb.ListLive do
             }
             this.cancelEvent = event => { event.preventDefault(); this.cancel() }
             this.click = event => {
-              const rect = this.el.getBoundingClientRect()
-              const outside = event.target === this.el &&
-                (event.clientX < rect.left || event.clientX > rect.right ||
-                 event.clientY < rect.top || event.clientY > rect.bottom)
-              if (outside || event.target.closest("[data-cancel-task]")) this.cancel()
+              if (event.target.closest("[data-cancel-task]")) this.cancel()
             }
             this.keydown = event => {
               if (event.key !== "Enter" || event.isComposing || event.target !== this.title) return
@@ -698,7 +705,6 @@ defmodule ToWeb.ListLive do
             this.el.addEventListener("close", this.closed)
             this.el.addEventListener("click", this.click)
             this.el.addEventListener("keydown", this.keydown)
-            window.addEventListener("resize", this.position)
             this.handleEvent("open-task", () => this.open())
             this.handleEvent("task-saved", () => {
               this.form.reset()
@@ -714,49 +720,51 @@ defmodule ToWeb.ListLive do
             this.el.removeEventListener("close", this.closed)
             this.el.removeEventListener("click", this.click)
             this.el.removeEventListener("keydown", this.keydown)
-            window.removeEventListener("resize", this.position)
           }
         }
       </script>
-      <p :if={@groups == []}>Nothing to do.</p>
-      <section
-        :for={{group, items} <- @groups}
-        data-drop-group={if is_binary(group), do: group, else: ""}
-      >
-        <.form
-          :if={is_binary(group)}
-          for={%{}}
-          id={"group-#{Enum.min_by(items, & &1.id).id}"}
-          phx-change="rename-group"
+      <div id="task-groups" data-drop-group="">
+        <p id="ungroup-target" data-drop-group="">No group · Drop a task here to ungroup</p>
+        <p :if={@groups == []}>Nothing to do.</p>
+        <section
+          :for={{group, items} <- @groups}
+          data-drop-group={if is_binary(group), do: group, else: ""}
         >
-          <input type="hidden" name="group[old]" value={group} />
-          <input
-            name="group[name]"
-            value={group}
-            aria-label="Group name"
-            size={max(String.length(group), 1)}
-            data-group={group}
-            maxlength="100"
-            phx-debounce="400"
-            phx-blur="rename-group-blur"
-            phx-value-old={group}
-          />
-          <button
-            type="button"
-            phx-click="open-task"
-            phx-value-group={group}
-            aria-label={"Add todo to #{group}"}
-          >+</button>
-        </.form>
-        <ul class={if is_binary(group), do: "grouped"}>
-          <.task_row
-            :for={task <- items}
-            task={task}
-            users={@users}
-            errors={@inline_errors[task.id] || []}
-          />
-        </ul>
-      </section>
+          <.form
+            :if={is_binary(group)}
+            for={%{}}
+            id={"group-#{Enum.min_by(items, & &1.id).id}"}
+            phx-change="rename-group"
+          >
+            <input type="hidden" name="group[old]" value={group} />
+            <input
+              name="group[name]"
+              value={group}
+              aria-label="Group name"
+              size={max(String.length(group), 1)}
+              data-group={group}
+              maxlength="100"
+              phx-debounce="400"
+              phx-blur="rename-group-blur"
+              phx-value-old={group}
+            />
+            <button
+              type="button"
+              phx-click="open-task"
+              phx-value-group={group}
+              aria-label={"Add todo to #{group}"}
+            >+</button>
+          </.form>
+          <ul class={if is_binary(group), do: "grouped"}>
+            <.task_row
+              :for={task <- items}
+              task={task}
+              users={@users}
+              errors={@inline_errors[task.id] || []}
+            />
+          </ul>
+        </section>
+      </div>
       <details :if={@completed_tasks != []} id="completed-tasks">
         <summary>Completed ({length(@completed_tasks)})</summary><ul>
           <.task_row
@@ -787,7 +795,16 @@ defmodule ToWeb.ListLive do
         mounted() {
           this.keydown = event => {
             const title = document.getElementById("quick-title")
-            if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key) &&
+            if (event.altKey && ["ArrowLeft", "ArrowRight"].includes(event.key) &&
+              event.target.matches('li > input[type="checkbox"]')) {
+              event.preventDefault()
+              const lists = [...this.el.querySelectorAll("[data-drop-list]")]
+              const current = lists.findIndex(el => el.getAttribute("aria-current") === "page")
+              const target = lists[current + (event.key === "ArrowRight" ? 1 : -1)]
+              if (target) this.pushEvent("move-to-list", {
+                id: event.target.closest("li").dataset.taskId, list_id: target.dataset.dropList
+              })
+            } else if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key) &&
               event.target.matches('li > input[type="checkbox"]')) {
               event.preventDefault()
               const row = event.target.closest("li")
@@ -803,6 +820,7 @@ defmodule ToWeb.ListLive do
           window.addEventListener("keydown", this.keydown)
           this.clearDrag = () => {
             if (!this.drag) return
+            this.el.classList.remove("dragging-task")
             this.drag.row.classList.remove("dragging")
             this.drag.target?.classList.remove("drop-target")
             if (this.drag.grip.hasPointerCapture(this.drag.pointerId)) {
@@ -824,7 +842,8 @@ defmodule ToWeb.ListLive do
             drag.active = true
             event.preventDefault()
             drag.row.classList.add("dragging")
-            const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-group]")
+            this.el.classList.add("dragging-task")
+            const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-group], [data-drop-list]")
             drag.target?.classList.remove("drop-target")
             drag.target = this.el.contains(target) ? target : null
             drag.target?.classList.add("drop-target")
@@ -834,8 +853,12 @@ defmodule ToWeb.ListLive do
             if (!drag || event.pointerId !== drag.pointerId) return
             if (drag.active) {
               this.skipClick = true
-              if (event.type === "pointerup" && drag.target && drag.target.dataset.dropGroup !== drag.row.dataset.group) {
-                this.pushEvent("move-task", {id: drag.row.dataset.taskId, group: drag.target.dataset.dropGroup})
+              if (event.type === "pointerup" && drag.target) {
+                if (drag.target.dataset.dropList && drag.target.getAttribute("aria-current") !== "page") {
+                  this.pushEvent("move-to-list", {id: drag.row.dataset.taskId, list_id: drag.target.dataset.dropList})
+                } else if (drag.target.dataset.dropGroup !== undefined && drag.target.dataset.dropGroup !== drag.row.dataset.group) {
+                  this.pushEvent("move-task", {id: drag.row.dataset.taskId, group: drag.target.dataset.dropGroup})
+                }
               }
             }
             this.clearDrag()
