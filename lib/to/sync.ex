@@ -4,6 +4,17 @@ defmodule To.Sync do
   alias To.Accounts.{Google, User}
   alias To.Tasks.Task
 
+  def enabled?, do: Application.get_env(:to, :google_sync_enabled, true)
+
+  def needed?(changeset, task) do
+    fields = [:title, :description, :due_on, :assignee_id, :completed_at, :deleted_at]
+
+    enabled?() && Enum.any?(fields, &Map.has_key?(changeset.changes, &1)) &&
+      (Enum.any?([changeset.data, task], fn candidate ->
+         eligible?(candidate) && connected?(Accounts.get_user(candidate.assignee_id))
+       end) || Repo.exists?(from(e in GoogleExport, where: e.task_id == ^task.id)))
+  end
+
   # The caller inserts this job in the same transaction as the task change.
   def enqueue(task), do: SyncWorker.new(%{task_id: task.id})
 
@@ -119,21 +130,28 @@ defmodule To.Sync do
   defp import_task(_, _, _), do: :invalid
 
   def enqueue_for_user(user) do
-    Repo.all(
-      from(t in Task,
-        left_join: e in GoogleExport,
-        on: e.task_id == t.id,
-        where: t.assignee_id == ^user.id or e.user_id == ^user.id,
-        distinct: true
+    if enabled?() do
+      Repo.all(
+        from(t in Task,
+          left_join: e in GoogleExport,
+          on: e.task_id == t.id,
+          where:
+            (t.assignee_id == ^user.id and not is_nil(t.due_on) and is_nil(t.deleted_at)) or
+              e.user_id == ^user.id,
+          distinct: true
+        )
       )
-    )
-    |> Enum.each(fn task -> task |> enqueue() |> Oban.insert() end)
+      |> Enum.each(fn task -> task |> enqueue() |> Oban.insert() end)
 
-    broadcast_status()
+      broadcast_status()
+    end
+
     :ok
   end
 
-  def status do
+  def status, do: if(enabled?(), do: job_status(), else: :idle)
+
+  defp job_status do
     latest =
       from(j in Oban.Job,
         where: j.worker == "To.SyncWorker",
@@ -141,20 +159,24 @@ defmodule To.Sync do
         select: %{id: max(j.id)}
       )
 
-    states =
+    jobs =
       Repo.all(
         from(j in Oban.Job,
           join: latest in subquery(latest),
           on: j.id == latest.id,
-          select: j.state
+          select: %{state: j.state, errors: j.errors}
         )
       )
 
     cond do
-      "retryable" in states -> :retrying
-      Enum.any?(states, &(&1 in ["available", "scheduled", "executing"])) -> :pending
-      "discarded" in states -> :error
-      true -> :idle
+      Enum.any?(jobs, &(&1.state == "discarded")) ->
+        :error
+
+      Enum.any?(jobs, &(&1.state != "completed" && &1.state != "cancelled" && &1.errors != [])) ->
+        :retrying
+
+      true ->
+        :idle
     end
   end
 
@@ -163,20 +185,21 @@ defmodule To.Sync do
   def broadcast_status,
     do: Phoenix.PubSub.broadcast(To.PubSub, "google-sync", {:sync_status, status()})
 
-  def run(task_id) do
-    task = Repo.get(Task, task_id)
-    exports = Repo.all(from(e in GoogleExport, where: e.task_id == ^task_id))
+  # Oban emits these events after recording completion or failure in the database.
+  def handle_job_event(_, _, %{job: %{worker: "To.SyncWorker"}}, _), do: broadcast_status()
+  def handle_job_event(_, _, _, _), do: :ok
 
-    result =
+  def run(task_id) do
+    if enabled?() do
+      task = Repo.get(Task, task_id)
+      exports = Repo.all(from(e in GoogleExport, where: e.task_id == ^task_id))
+
       with :ok <- remove_stale_exports(task, exports) do
         if eligible?(task), do: export(task), else: :ok
       end
-
-    # Oban records completion or retry after perform returns. Only the header
-    # needs updating; sync progress must not rerender the task forms.
-    :timer.apply_after(100, __MODULE__, :broadcast_status, [])
-
-    result
+    else
+      {:cancel, :google_sync_disabled}
+    end
   end
 
   defp eligible?(nil), do: false
@@ -213,17 +236,22 @@ defmodule To.Sync do
 
   defp export(task) do
     user = Accounts.get_user(task.assignee_id)
+    existing = Repo.get_by(GoogleExport, task_id: task.id, user_id: user.id)
 
-    if connected?(user) do
-      with {:ok, token} <- Google.refresh_access_token(user) do
-        case Repo.get_by(GoogleExport, task_id: task.id, user_id: user.id) do
-          nil -> create_export(task, token)
-          existing -> update_export(task, token, existing)
+    cond do
+      !connected?(user) ->
+        # OAuth completion queues these again when credentials are available.
+        :ok
+
+      existing && existing.payload_hash == payload_hash(task) ->
+        :ok
+
+      true ->
+        with {:ok, token} <- Google.refresh_access_token(user) do
+          if existing,
+            do: update_export(task, token, existing),
+            else: create_export(task, token)
         end
-      end
-    else
-      # OAuth completion queues these again. Missing credentials must not block local work.
-      :ok
     end
   end
 

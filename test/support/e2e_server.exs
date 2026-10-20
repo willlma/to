@@ -1,8 +1,24 @@
 {:ok, _} = To.E2E.Mock.start_link()
+
+:telemetry.attach(
+  "e2e-sync-completion-delay",
+  [:oban, :engine, :complete_job, :start],
+  &To.E2E.Mock.delay_sync_completion/4,
+  nil
+)
+
 {:ok, _} = Bandit.start_link(plug: To.E2E.Mock, port: 4010, ip: {127, 0, 0, 1})
 To.Accounts.ensure_household_users()
 [default | _] = To.Tasks.list_lists()
 will = Enum.find(To.Accounts.list_users(), &(&1.name == "Will"))
+nicole = Enum.find(To.Accounts.list_users(), &(&1.name == "Nicole"))
+
+{:ok, unedited} = To.Tasks.create_task(will, default.id, %{title: "Unedited legacy fixture"})
+
+unedited
+|> Ecto.Changeset.change(last_changed_fields: nil, updated_at: unedited.created_at)
+|> To.Repo.update!()
+
 # Completion regression cases: yesterday's completion belongs at the bottom,
 # while today's completion stays in its group even if it is hours old.
 today = DateTime.now!("America/Los_Angeles") |> DateTime.to_date()
@@ -16,7 +32,12 @@ for {title, completed_at} <- [
     To.Tasks.create_task(will, default.id, %{title: title, nested_under: "Housekeeping"})
 
   task
-  |> Ecto.Changeset.change(completed_at: DateTime.shift_zone!(completed_at, "Etc/UTC"))
+  |> Ecto.Changeset.change(
+    completed_at: DateTime.shift_zone!(completed_at, "Etc/UTC"),
+    updated_at: DateTime.add(task.created_at, 1, :second),
+    updated_by_id: if(title == "Recent completion fixture", do: nicole.id, else: will.id),
+    last_changed_fields: nil
+  )
   |> To.Repo.update!()
 end
 

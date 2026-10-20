@@ -25,6 +25,11 @@ No PostgreSQL or Docker service is needed.
 Each worktree has its own database. To run multiple development servers, give
 each a different port, for example `PORT=4001 APP_DEV_LOGIN=true mix phx.server`.
 
+Google Tasks sync is disabled by default in local development, including queued
+retries from an existing development database. Local edits and deletions stay local.
+Set `APP_GOOGLE_SYNC=true` only to opt into real Google sync; this also resumes
+pending sync jobs. Production sync and the E2E Google simulation remain enabled.
+
 The explicit development login option provides Nicole/Will links without Google
 credentials. It is absent from production builds. Normal Google sign-in requires
 all five OAuth settings below. `mix setup` is also available on a standard machine.
@@ -42,15 +47,21 @@ Compile before bundling assets so LiveView can generate both manifests.
   tasks for both people, cancels reminders, and queues deletion of their Google
   copies. The last remaining list cannot be deleted.
 - Typing outside another control focuses quick entry. Starting a todo opens a
-  full-screen native dialog that hides the todos. Add sits beside the title, and
+  native dialog anchored to quick entry, keeping the title's position and height.
+  List tabs remain visible above it; the dialog covers all todos below it down
+  to the bottom of the screen. Add/Save sits beside the title, and
   the title requests a Done keyboard action on phones. Enter saves from the
-  title; Shift+Enter focuses the description. Escape or Cancel
-  collapses the details and keeps the draft; resuming typing opens it again.
+  title; Shift+Enter focuses the description. Escape, Cancel, or clicking outside
+  the form collapses the details and keeps the draft; resuming typing opens it again.
   The plus beside a group opens the same dialog with that group filled in.
-- Click a task's title or description to edit inline; blur or Enter saves.
+- Each row's pen button opens its saved details in the same dialog.
+  Save (or Enter from the title) applies changes; Escape, Cancel, or clicking outside
+  the form discards edits and returns focus to the row. Any unfinished new-task draft is kept separately.
+  Click a task's title or description to edit inline; blur or Enter saves.
   Enter from a title focuses quick entry; Shift+Enter focuses its description.
   Shift+Enter in a description adds a line. Empty descriptions have no placeholder.
-  The checkbox toggles completion; × deletes immediately.
+  The checkbox toggles completion. The trash icon opposite Cancel in the edit dialog
+  deletes immediately and returns focus to quick entry.
   Clearing a title and leaving the field also deletes;
   tasks with a description, date, assignee, group, or completion require confirmation
   when deleted by clearing the title. Cancel restores the title.
@@ -84,12 +95,22 @@ Compile before bundling assets so LiveView can generate both manifests.
   saving changes; opening a list also recalculates the section. There is no minute
   polling. Reopening restores the task to its group and deadline order; completing
   again keeps it in place until the next midnight. Tasks are not deleted.
-- Actor IDs and creation/update timestamps are stored. No version-history table.
+- The edit dialog shows who created a task and when, plus the last editor, time,
+  and changed fields. Times use 24-hour America/Los_Angeles time with the timezone.
+  One `last_changed_fields` column is overwritten on each real edit; cancel and
+  unchanged saves preserve the existing metadata. Older tasks show their last
+  update without a changed-fields list; matching creation/update timestamps omit
+  the update line. The updater's name is omitted when they also created the task.
+  No version-history table.
 - Google sync is **one way**: eligible assigned, dated tasks from every app list
   go to that person's existing default Google Tasks list. App lists are not
   created in Google Tasks. Completion, edits, reassignment, deletion,
   and removal of eligibility update/remove the copy. Google edits are not imported.
-  A single header indicator shows sync progress and retries across all lists.
+  Saves succeed when the local database transaction commits; Google work happens
+  afterward. Group/list moves and changes to tasks with no Google copy or export
+  eligibility do not queue sync work. Unchanged Google payloads make no API calls.
+  Pending work and successful syncs stay silent. A message below quick entry shows
+  Google failures and automatic retries, and clears when recovery succeeds.
 - Settings has **Import Google Tasks** to copy incomplete tasks from your default
   Google list into the default app list (the oldest remaining list), assigned to you.
   Undated tasks are included. Incomplete subtasks become bullets in their parent's

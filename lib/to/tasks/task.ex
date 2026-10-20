@@ -10,6 +10,7 @@ defmodule To.Tasks.Task do
     field(:completed_at, :utc_datetime)
     field(:deleted_at, :utc_datetime)
     field(:google_import_id, :string)
+    field(:last_changed_fields, {:array, :string}, default: [])
     belongs_to(:google_import_user, To.Accounts.User)
     belongs_to(:list, To.Tasks.List)
     belongs_to(:assignee, To.Accounts.User)

@@ -29,6 +29,13 @@ if config_env() != :test do
 end
 
 if config_env() == :dev do
+  google_sync_enabled = System.get_env("APP_GOOGLE_SYNC") == "true"
+  config :to, :google_sync_enabled, google_sync_enabled
+
+  unless google_sync_enabled do
+    config :to, Oban, queues: [google_sync: [limit: 1, paused: true]]
+  end
+
   config :to, ToWeb.Endpoint,
     live_reload: [
       patterns: [~r"priv/static/.*\.(js|css|png|svg)$", ~r"lib/to_web/.*\.(ex|heex)$"]

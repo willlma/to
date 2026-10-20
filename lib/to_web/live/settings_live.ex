@@ -16,6 +16,9 @@ defmodule ToWeb.SettingsLive do
     user = socket.assigns.current_user
 
     cond do
+      !To.Sync.enabled?() ->
+        {:noreply, assign(socket, notice: "Google sync is disabled for local development.")}
+
       socket.assigns.importing ->
         {:noreply, socket}
 
@@ -195,16 +198,20 @@ defmodule ToWeb.SettingsLive do
       </script>
       <p id="notification-status" role="status" phx-update="ignore"></p>
       <small>On iPhone, add To to your Home Screen before enabling notifications.</small>
-      <.form for={%{}} id="google-import-form" phx-submit="import-google">
-        <button disabled={@importing}>
-          {cond do
-            @importing -> "Importing…"
-            @google_reconnect -> "Reconnect to Google"
-            @current_user.google_refresh_token in [nil, ""] -> "Connect to Google"
-            true -> "Import Google Tasks"
-          end}
-        </button>
-      </.form>
+      <%= if To.Sync.enabled?() do %>
+        <.form for={%{}} id="google-import-form" phx-submit="import-google">
+          <button disabled={@importing}>
+            {cond do
+              @importing -> "Importing…"
+              @google_reconnect -> "Reconnect to Google"
+              @current_user.google_refresh_token in [nil, ""] -> "Connect to Google"
+              true -> "Import Google Tasks"
+            end}
+          </button>
+        </.form>
+      <% else %>
+        <p>Google sync is disabled for local development.</p>
+      <% end %>
       <.form for={%{}} action="/logout" method="delete"><button>Sign out</button></.form>
       <p :if={@notice} role="status">{@notice}</p>
     </main>

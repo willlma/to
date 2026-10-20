@@ -29,6 +29,39 @@ async function createTask(page, title, options = {}) {
   return page.locator('[data-task-id="' + id + '"]');
 }
 
+async function expectAnchoredDialog(page, anchor) {
+  anchor ||= await page.locator('#quick-title').boundingBox();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect.poll(async () => {
+    const title = await page.locator('#task-title').boundingBox();
+    return Math.max(...['x','y','height'].map(key => Math.abs(title[key] - anchor[key])));
+  }).toBeLessThan(1);
+  const title = await page.locator('#task-title').boundingBox();
+  const save = await dialog.getByRole('button', {name:/^(Add|Save)$/}).boundingBox();
+  expect(Math.abs(save.y - title.y)).toBeLessThan(1);
+  expect(save.x).toBeGreaterThanOrEqual(title.x + title.width);
+  const bounds = await dialog.boundingBox();
+  expect(bounds.x).toBe(0);
+  expect(bounds.width).toBe(page.viewportSize().width);
+  expect(Math.abs(bounds.y - anchor.y)).toBeLessThan(1);
+  expect(Math.abs(bounds.y + bounds.height - page.viewportSize().height)).toBeLessThan(1);
+  const header = await page.locator('header').boundingBox();
+  expect(header.y).toBeGreaterThanOrEqual(0);
+  expect(header.y + header.height).toBeLessThanOrEqual(bounds.y);
+  await expect(page.getByRole('navigation', {name:'Lists',includeHidden:true})).toBeVisible();
+}
+
+async function deleteTask(page, row) {
+  await expect(row.getByRole('button', {name:/^Delete /})).toHaveCount(0);
+  await row.getByRole('button', {name:/^Edit /}).click();
+  const dialog = page.getByRole('dialog', {name:'Edit todo',exact:true});
+  await dialog.getByRole('button', {name:'Delete',exact:true}).click();
+  await expect(dialog).toBeHidden();
+  await expect(row).toHaveCount(0);
+  await expect(page.locator('#quick-title')).toBeFocused();
+}
+
 async function editTask(page, row, changes) {
   if ('assignee' in changes) {
     const picker = row.getByRole('combobox', {name:'Assignee'});
@@ -100,6 +133,15 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await page.locator('#task-title').press('Enter');
   await expect(taskRow(page, 'Body typing')).toHaveCount(1);
   await expect(page.locator('#task-title')).toHaveValue('');
+  await test.step('Omit update history for a legacy task with matching timestamps', async () => {
+    await taskRow(page, 'Unedited legacy fixture').getByRole('button', {name:'Edit Unedited legacy fixture',exact:true}).click();
+    const history = page.locator('#task-history');
+    await expect(history).toContainText('Created by Will');
+    await expect(history).not.toContainText(/Updated|Changed:/);
+    await expect(history.locator('time')).toHaveCount(1);
+    await page.screenshot({path:'artifacts/e2e/task-history-legacy-unedited.png',fullPage:true});
+    await page.getByRole('button', {name:'Cancel',exact:true}).click();
+  });
   await test.step('Separate completions at local midnight and restore reopened tasks', async () => {
     const completed = page.locator('#completed-tasks');
     const recent = taskRow(page, 'Recent completion fixture');
@@ -109,11 +151,28 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(page.locator('#completed-tasks ~ section')).toHaveCount(0);
     await expect(recent).toBeVisible();
     await expect(recent.getByRole('checkbox')).toBeChecked();
+    await recent.getByRole('button', {name:'Edit Recent completion fixture',exact:true}).click();
+    await expect(page.locator('#task-history')).toContainText('Created by Will');
+    await expect(page.locator('#task-history p').nth(1)).toContainText('Updated by Nicole at');
+    await expect(page.locator('#task-history')).not.toContainText(/unavailable|weren’t recorded|Changed:/);
+    await page.screenshot({path:'artifacts/e2e/task-history-legacy-other-editor.png',fullPage:true});
+    await page.getByRole('button', {name:'Cancel',exact:true}).click();
     await expect(page.locator('section[data-drop-group="Housekeeping"]').locator('[data-task-id]')).toHaveCount(1);
     await completed.locator('summary').click();
     const archived = taskRow(page, 'Archived fixture');
     await expect(archived).toBeVisible();
     await page.screenshot({path:'artifacts/e2e/completed-section.png', fullPage:true});
+    const editArchived = archived.getByRole('button', {name:'Edit Archived fixture',exact:true});
+    await editArchived.click();
+    await expect(page.getByRole('dialog', {name:'Edit todo',exact:true})).toBeVisible();
+    await expect(page.locator('#task-title')).toHaveValue('Archived fixture');
+    await expect(page.locator('#task-history')).toContainText('Created by Will');
+    await expect(page.locator('#task-history p').nth(1)).toContainText('Updated at');
+    await expect(page.locator('#task-history p').nth(1)).not.toContainText('by Will');
+    await expect(page.locator('#task-history')).not.toContainText(/unavailable|weren’t recorded|Changed:/);
+    await page.screenshot({path:'artifacts/e2e/task-history-legacy-same-editor.png',fullPage:true});
+    await page.locator('#task-title').press('Escape');
+    await expect(editArchived).toBeFocused();
     await archived.getByRole('checkbox').uncheck();
     await expect(completed).toHaveCount(0);
     await expect(page.locator('section[data-drop-group="Housekeeping"]').locator('[data-task-id]')).toHaveCount(2);
@@ -208,13 +267,17 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await yesterday.getByRole('checkbox').check();
     await expect(yesterday).not.toHaveClass(/overdue/);
     await page.screenshot({path:'artifacts/e2e/deadlines.png', fullPage:true});
-    for (const [title] of fixtures) await taskRow(page, title).getByRole('button', {name:`Delete ${title}`, exact:true}).click();
+    for (const [title] of fixtures) await deleteTask(page, taskRow(page, title));
   });
 
   await test.step('Move between lists without losing task details', async () => {
     const transfer = await createTask(page, 'Transfer details', {
       description:'Keep these notes', due:'2030-05-03', assignee:'Nicole', group:'Dairy'
     });
+    const transferId = Number(await transfer.getAttribute('data-task-id'));
+    await expect.poll(async () => (await googleState(request)).jobs.filter(j => j.worker === 'To.SyncWorker' && j.args.task_id === transferId).at(-1)?.state).toBe('completed');
+    const remote = (await googleTasks(request,'nicole')).find(t => t.title === 'Transfer details');
+    const beforeSync = await googleState(request);
     const source = page.getByRole('link', {name:'To do', exact:true});
     await transfer.getByRole('checkbox').dragTo(source);
     await expect(transfer).toHaveCount(0);
@@ -226,12 +289,33 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(moved.getByLabel('Due date', {exact:true})).toHaveValue('2030-05-03');
     await expect(moved.getByLabel('Assignee', {exact:true}).locator('option:checked')).toHaveText('Nicole');
     await expect(moved.getByRole('checkbox')).not.toBeChecked();
+    await moved.getByRole('button',{name:'Edit Transfer details',exact:true}).click();
+    await expect(page.locator('#task-history')).toContainText('Changed: Group, list.');
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    await expect(page.getByRole('dialog')).toBeHidden();
+    await expect(moved.getByRole('button',{name:'Edit Transfer details',exact:true})).toBeFocused();
     await moved.getByRole('checkbox').press('Alt+ArrowRight');
     await expect(moved).toHaveCount(0);
     await page.getByRole('link', {name:'Groceries', exact:true}).click();
     await expect(transfer).toBeVisible();
     await expect(taskRow(nicole, 'Transfer details')).toBeVisible();
-    await transfer.getByRole('button', {name:'Delete Transfer details',exact:true}).click();
+    await transfer.getByRole('button',{name:'Edit Transfer details',exact:true}).click();
+    await page.locator('#task-group').fill('Quiet group');
+    await page.getByRole('dialog').getByRole('button',{name:'Save',exact:true}).click();
+    await expect(transfer).toHaveAttribute('data-group','Quiet group');
+    await transfer.getByRole('button',{name:'Edit Transfer details',exact:true}).click();
+    await expect(page.locator('#task-history')).toContainText('Changed: Group.');
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    const afterSync = await googleState(request);
+    const syncJobs = state => state.jobs.filter(j => j.worker === 'To.SyncWorker' && j.args.task_id === transferId);
+    const remoteCalls = state => state.calls.filter(c => c.path.endsWith('/'+remote.id));
+    expect(syncJobs(afterSync)).toEqual(syncJobs(beforeSync));
+    expect(remoteCalls(afterSync)).toEqual(remoteCalls(beforeSync));
+    // Reconnecting/replaying a sync must not resend an unchanged payload.
+    await request.post('http://127.0.0.1:4010/__sync-google',{data:{person:'Nicole'}});
+    await expect.poll(async () => syncJobs(await googleState(request)).at(-1)?.state).toBe('completed');
+    expect(remoteCalls(await googleState(request))).toEqual(remoteCalls(beforeSync));
+    await deleteTask(page, transfer);
   });
 
   // Moving groups must persist across browsers, preserve completion and keep due-date sorting.
@@ -314,7 +398,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await expect(page.locator('input[data-group="Cold food"]')).toHaveCount(0);
 
   await expect(page.locator('header strong')).toHaveCount(0);
-  await expect(page.getByRole('button', {name:/^Edit /})).toHaveCount(0);
+  await expect(friday.locator('button[phx-click="edit-task"]')).toBeVisible();
   const listUrl = page.url();
   await expect(page.locator('#reminder-form')).toBeHidden();
   await page.getByRole('link', {name:'Settings for Will'}).click();
@@ -482,11 +566,11 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await milkRow.getByRole('textbox', {name:'Title', exact:true}).press('Tab');
   await expect(milkRow.getByRole('textbox', {name:'Title', exact:true})).toHaveValue('Milk, eggs and bread');
   await expect(taskRow(nicole, 'Milk, eggs and bread')).toBeVisible();
-  const disposable = await createTask(page, 'Delete inline', {description:'The x needs no confirmation'});
+  const disposable = await createTask(page, 'Delete inline', {description:'Deleting from the dialog needs no confirmation'});
   const unexpectedDialogs = [];
   const unexpectedDialog = async dialog => { unexpectedDialogs.push(dialog.message()); await dialog.dismiss(); };
   page.on('dialog', unexpectedDialog);
-  await disposable.getByRole('button', {name:'Delete Delete inline', exact:true}).click();
+  await deleteTask(page, disposable);
   await expect(disposable).toHaveCount(0);
   page.off('dialog', unexpectedDialog);
   expect(unexpectedDialogs).toEqual([]);
@@ -530,7 +614,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await page.setViewportSize({width:390, height:844});
   await expect(page.locator('[id^="task-options-"]')).toHaveCount(0);
   const compact = await plain.evaluate(row => {
-    const controls = [row.querySelector('input[type="checkbox"]'), row.querySelector('.task-title'), row.querySelector('select'), row.querySelector('.task-date'), row.querySelector(':scope > button')];
+    const controls = [row.querySelector('input[type="checkbox"]'), row.querySelector('.task-title'), row.querySelector('select'), row.querySelector('.task-date'), ...row.querySelectorAll(':scope > button')];
     const checkbox = controls[0].getBoundingClientRect();
     const description = row.querySelector('textarea').getBoundingClientRect();
     return {centers:controls.map(el => {const r=el.getBoundingClientRect(); return r.y+r.height/2}), descriptionBelow:description.top >= checkbox.bottom, descriptionLeft:description.left, titleLeft:controls[1].getBoundingClientRect().left, overflow:document.documentElement.scrollWidth > innerWidth};
@@ -566,10 +650,13 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await description.press('Tab');
   });
 
-  await test.step('Preserve the draft in a full-screen dialog', async () => {
+  await test.step('Keep quick entry fixed, show list tabs, and cover tasks with the dialog', async () => {
     const row = milkRow;
+    await page.setViewportSize({width:1280,height:800});
     const before = await row.boundingBox();
     const quick = page.locator('#quick-title');
+    const anchor = await quick.boundingBox();
+    const header = await page.locator('header').boundingBox();
     await expect(page.getByRole('button', {name:'Add', exact:true})).toBeHidden();
     await quick.fill('Typing opens details');
     const dialog = page.getByRole('dialog', {name:'New todo'});
@@ -577,12 +664,13 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(page.locator('#task-title')).toHaveValue('Typing opens details');
     await expect(page.locator('#task-title')).toBeFocused();
     await expect(page.locator('#task-description')).toBeVisible();
-    const bounds = await dialog.boundingBox();
-    expect(bounds).toEqual({x:0, y:0, ...page.viewportSize()});
+    await expectAnchoredDialog(page, anchor);
+    expect(await page.locator('header').boundingBox()).toEqual(header);
+    await page.screenshot({path:'artifacts/e2e/anchored-task-dialog-desktop.png',fullPage:true});
     await expect(page.locator('#task-title')).toHaveAttribute('enterkeyhint', 'done');
     const add = await dialog.getByRole('button', {name:'Add', exact:true}).boundingBox();
-    const titleBounds = await page.locator('#task-title').boundingBox();
-    expect(Math.abs(add.y - titleBounds.y)).toBeLessThan(2);
+    const title = await page.locator('#task-title').boundingBox();
+    expect(Math.abs(add.y - title.y)).toBeLessThan(1);
     expect(await dialog.evaluate(el => getComputedStyle(el).backgroundColor)).toBe(await page.locator('body').evaluate(el => getComputedStyle(el).backgroundColor));
     expect(await dialog.evaluate(el => getComputedStyle(el, '::backdrop').backgroundColor)).toBe('rgba(0, 0, 0, 0)');
     expect((await row.boundingBox()).y).toBe(before.y);
@@ -634,7 +722,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await quick.fill('Cancelled draft');
     await expect(page.locator('#task-description')).toHaveValue('Retained after cancel');
     await expect(page.locator('#task-group')).toHaveValue('Draft group');
-    await dialog.click({position:{x:2,y:2}});
+    await page.locator('#task-description').click();
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', {name:'Cancel', exact:true}).click();
     await expect(dialog).toBeHidden();
@@ -649,12 +737,20 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(quick).toBeFocused();
     await page.setViewportSize({width:390,height:844});
     await page.emulateMedia({colorScheme:'dark'});
+    const phoneAnchor = await quick.boundingBox();
     await quick.fill('Phone draft');
     await expect(dialog).toBeVisible();
     expect(await page.locator('#task-assignee').evaluate(el => getComputedStyle(el).backgroundColor)).toBe(await dialog.evaluate(el => getComputedStyle(el).backgroundColor));
     await expect(page.locator('#task-description')).toHaveValue('Retained after cancel');
     await expect(page.locator('#task-group')).toHaveValue('Draft group');
-    expect(await dialog.boundingBox()).toEqual({x:0,y:0,width:390,height:844});
+    await expectAnchoredDialog(page, phoneAnchor);
+    await page.setViewportSize({width:360,height:320});
+    await expectAnchoredDialog(page);
+    expect(await dialog.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+    await dialog.getByRole('button', {name:'Cancel',exact:true}).scrollIntoViewIfNeeded();
+    await expect(dialog.getByRole('button', {name:'Cancel',exact:true})).toBeInViewport();
+    await page.setViewportSize({width:390,height:844});
+    await expectAnchoredDialog(page);
     await page.screenshot({path:'artifacts/e2e/stable-task-dialog.png', fullPage:true});
     await page.locator('#task-title').press('Enter');
     await expect(taskRow(page, 'Phone draft').getByRole('textbox', {name:'Description', exact:true})).toHaveValue('Retained after cancel');
@@ -667,21 +763,206 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await page.locator('#task-title').press('Escape');
     await expect(dialog).toBeHidden();
   });
+  await test.step('Dismiss outside clicks without moving quick entry or losing drafts', async () => {
+    const measurements = [];
+    const quick = page.locator('#quick-title');
+    const dialog = page.getByRole('dialog', {name:'New todo',exact:true});
+    const listUrl = page.url();
+    for (const viewport of [{width:1280,height:800}, {width:390,height:844}]) {
+      await page.setViewportSize(viewport);
+      const before = await quick.boundingBox();
+      const tab = await page.locator('nav a').first().boundingBox();
+      const outside = [
+        {name:'list tabs', x:tab.x + tab.width/2, y:tab.y + tab.height/2},
+        {name:'side margin', x:2, y:before.y + 20},
+        {name:'below the form', x:viewport.width/2, y:viewport.height - 2}
+      ];
+      for (const point of outside) {
+        const title = `Outside click: ${viewport.width}, ${point.name}`;
+        await quick.fill(title);
+        await page.locator('#task-description').fill('Preserve outside-click notes');
+        await page.locator('#task-due').fill('2031-01-02');
+        await page.locator('#task-description').click();
+        await expect(dialog).toBeVisible();
+        await expectAnchoredDialog(page, before);
+        const opened = await page.locator('#task-title').boundingBox();
+        await page.mouse.click(point.x, point.y);
+        await expect(dialog).toBeHidden();
+        await expect(page).toHaveURL(listUrl);
+        await expect(quick).toHaveValue(title);
+        await expect(quick).toBeFocused();
+        const after = await quick.boundingBox();
+        expect(after).toEqual(before);
+        measurements.push({viewport, outside:point.name, before, opened, after});
+        await page.keyboard.press('End');
+        await page.keyboard.type(' resumed');
+        await expectAnchoredDialog(page, before);
+        await expect(page.locator('#task-title')).toHaveValue(`${title} resumed`);
+        await expect(page.locator('#task-description')).toHaveValue('Preserve outside-click notes');
+        await expect(page.locator('#task-due')).toHaveValue('2031-01-02');
+        await page.locator('#task-title').press('Escape');
+        await expect(dialog).toBeHidden();
+        expect(await quick.boundingBox()).toEqual(before);
+      }
+      await page.screenshot({path:`artifacts/e2e/outside-dismissal-${viewport.width}.png`,fullPage:true});
+    }
+    await test.info().attach('outside-click-input-positions', {
+      body:JSON.stringify(measurements,null,2), contentType:'application/json'
+    });
+  });
+  await test.step('Reopen row details, cancel edits, and save without losing a new-task draft', async () => {
+    const row = await createTask(page, 'Dialog editing', {description:'Original details', due:'2030-09-04', assignee:'Will', group:'Dialog group'});
+    const quick = page.locator('#quick-title');
+    const dialog = page.getByRole('dialog', {name:'Edit todo', exact:true});
+    await quick.fill('Unfinished new task');
+    await page.locator('#task-description').fill('Keep my new-task notes');
+    await page.getByRole('button', {name:'Cancel', exact:true}).click();
+    const edit = row.getByRole('button', {name:'Edit Dialog editing', exact:true});
+    await edit.focus();
+    await edit.press('Enter');
+    await expect(dialog).toBeVisible();
+    await expect(page.locator('#task-title')).toBeFocused();
+    await expect(page.locator('#task-title')).toHaveValue('Dialog editing');
+    const history = page.locator('#task-history');
+    await expect(history).toContainText('Created by Will');
+    await expect(history).toContainText('No edits yet.');
+    const createdAt = await history.locator('time').first().getAttribute('datetime');
+    expect(Number.isNaN(Date.parse(createdAt))).toBe(false);
+    await expect(page.locator('#task-description')).toHaveValue('Original details');
+    await expect(page.locator('#task-due')).toHaveValue('2030-09-04');
+    await expect(page.locator('#task-assignee').locator('option:checked')).toHaveText('Will');
+    await expect(page.locator('#task-group')).toHaveValue('Dialog group');
+    await expectAnchoredDialog(page);
+    await page.screenshot({path:'artifacts/e2e/edit-task-dialog-mobile.png',fullPage:true});
+    await page.locator('#task-description').fill('Discard these edits');
+    await page.locator('#task-description').press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(edit).toBeFocused();
+    await expect(row.getByRole('textbox', {name:'Description', exact:true})).toHaveValue('Original details');
+    await expect(quick).toHaveValue('Unfinished new task');
+    await quick.click();
+    await expect(page.locator('#task-description')).toHaveValue('Keep my new-task notes');
+    await page.getByRole('button', {name:'Cancel', exact:true}).click();
+    await edit.click();
+    await expect(page.locator('#task-description')).toHaveValue('Original details');
+    await expect(history).toContainText('No edits yet.');
+    await page.locator('#task-title').fill('Discard title');
+    await page.mouse.click(2,2);
+    await expect(dialog).toBeHidden();
+    await expect(row.getByRole('textbox', {name:'Title',exact:true})).toHaveValue('Dialog editing');
+    await expect(edit).toBeFocused();
+    await page.setViewportSize({width:1280,height:800});
+    await edit.click();
+    await expectAnchoredDialog(page);
+    await page.locator('#task-title').fill('Dialog edited');
+    await page.locator('#task-description').fill('Saved details');
+    await page.locator('#task-due').fill('2030-09-05');
+    await page.locator('#task-assignee').selectOption({label:'Nicole'});
+    await page.locator('#task-group').fill('Edited group');
+    await page.screenshot({path:'artifacts/e2e/edit-task-dialog.png',fullPage:true});
+    await dialog.getByRole('button', {name:'Save', exact:true}).click();
+    await expect(dialog).toBeHidden();
+    await expect(row.getByRole('button', {name:'Edit Dialog edited', exact:true})).toBeFocused();
+    await expect(row.getByRole('textbox', {name:'Title',exact:true})).toHaveValue('Dialog edited');
+    await expect(row.getByRole('textbox', {name:'Description',exact:true})).toHaveValue('Saved details');
+    await expect(row.getByLabel('Due date', {exact:true})).toHaveValue('2030-09-05');
+    await expect(row.getByRole('combobox', {name:'Assignee'}).locator('option:checked')).toHaveText('Nicole');
+    await expect(row).toHaveAttribute('data-group','Edited group');
+    await row.getByRole('button',{name:'Edit Dialog edited',exact:true}).click();
+    await expect(history.locator('p').nth(1)).toContainText('Updated at');
+    await expect(history).toContainText('Changed: Title, description, due date, assignee, group.');
+    await expect(history.locator('time').first()).toHaveAttribute('datetime',createdAt);
+    const editedAt = await history.locator('time').nth(1).getAttribute('datetime');
+    expect(Date.parse(editedAt)).toBeGreaterThanOrEqual(Date.parse(createdAt));
+    await page.screenshot({path:'artifacts/e2e/task-history.png',fullPage:true});
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    // Opening and saving without changes must not credit the other person with an edit.
+    await taskRow(nicole,'Dialog edited').getByRole('button',{name:'Edit Dialog edited',exact:true}).tap();
+    await nicole.getByRole('button',{name:'Save',exact:true}).click();
+    await expect(nicole.getByRole('dialog')).toBeHidden();
+    await row.getByRole('button',{name:'Edit Dialog edited',exact:true}).click();
+    await expect(history.locator('p').nth(1)).toContainText('Updated at');
+    await expect(history).toContainText('Changed: Title, description, due date, assignee, group.');
+    await expect(history.locator('time').nth(1)).toHaveAttribute('datetime',editedAt);
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    await row.getByRole('checkbox').click();
+    await row.getByRole('button', {name:'Edit Dialog edited', exact:true}).click();
+    await page.locator('#task-description').fill('Completed task details');
+    await taskRow(nicole, 'Dialog edited').getByRole('button', {name:'Edit Dialog edited',exact:true}).tap();
+    const remoteTitle = nicole.locator('#task-title');
+    await remoteTitle.fill('Dialog edited remotely');
+    await remoteTitle.press('Enter');
+    await expect(row.getByRole('textbox', {name:'Title',exact:true})).toHaveValue('Dialog edited remotely');
+    await page.locator('#task-title').press('Enter');
+    await expect(row.getByRole('textbox', {name:'Title',exact:true})).toHaveValue('Dialog edited remotely');
+    await expect(row.getByRole('checkbox')).toBeChecked();
+    await expect(row.getByRole('textbox', {name:'Description',exact:true})).toHaveValue('Completed task details');
+    await row.getByRole('button',{name:'Edit Dialog edited remotely',exact:true}).click();
+    await expect(history).toContainText('Created by Will');
+    await expect(history.locator('p').nth(1)).toContainText('Updated at');
+    await expect(history).toContainText('Changed: Description.');
+    await expect(history.locator('time').first()).toHaveAttribute('datetime',createdAt);
+    await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    await quick.click();
+    await expect(page.locator('#task-title')).toHaveValue('Unfinished new task');
+    await expect(page.locator('#task-description')).toHaveValue('Keep my new-task notes');
+    await page.getByRole('button', {name:'Cancel', exact:true}).click();
+    await deleteTask(page, row);
+    await quick.click();
+    await expect(page.locator('#task-title')).toHaveValue('Unfinished new task');
+    await expect(page.locator('#task-description')).toHaveValue('Keep my new-task notes');
+    await expect(page.getByRole('dialog').getByRole('button', {name:'Delete',exact:true})).toHaveCount(0);
+    await page.getByRole('button', {name:'Cancel',exact:true}).click();
+  });
+  await test.step('Save locally and stay quiet during slow Google deletion', async () => {
+    const title = 'Delete with slow sync completion';
+    const row = await createTask(page, title, {due:'2030-10-02',assignee:'Will'});
+    const id = Number(await row.getAttribute('data-task-id'));
+    await expect.poll(async () => (await googleTasks(request, 'will')).some(t => t.title === title)).toBe(true);
+    for (const tab of [page,nicole]) await expect(tab.locator('#sync-status')).toHaveAttribute('data-state','idle');
+    await request.post('http://127.0.0.1:4010/__delay-sync-completion', {data:{task_id:id}});
+    await deleteTask(page, row);
+    const status = page.locator('#sync-status');
+    await expect.poll(async () => (await googleState(request)).jobs.filter(j => j.worker === 'To.SyncWorker' && j.args.task_id === id).at(-1)?.state).toBe('executing');
+    await expect.poll(async () => (await googleTasks(request, 'will')).some(t => t.title === title)).toBe(false);
+    for (const tab of [page,nicole]) await expect(tab.locator('#sync-status')).toBeHidden();
+    await expect(status.locator('svg')).toHaveCount(0);
+    await page.screenshot({path:'artifacts/e2e/deletion-sync-pending.png',fullPage:true});
+    await expect.poll(async () => (await googleState(request)).jobs.filter(j => j.worker === 'To.SyncWorker' && j.args.task_id === id).at(-1)?.state).toBe('completed');
+    // No navigation, edits, or reload may be needed to clear either person's header.
+    for (const tab of [page,nicole]) {
+      await expect(tab.locator('#sync-status')).toHaveAttribute('data-state','idle');
+      await expect(tab.locator('#sync-status')).toBeHidden();
+    }
+    await page.screenshot({path:'artifacts/e2e/deletion-sync-complete.png',fullPage:true});
+    await test.info().attach('deletion-sync-completed-jobs', {
+      body:JSON.stringify((await googleState(request)).jobs.filter(j => j.args.task_id === id),null,2),
+      contentType:'application/json'
+    });
+  });
   await test.step('Recover a lost Google response without duplicates', async () => {
     const retryTitle = 'Recover lost Google response';
     await request.post('http://127.0.0.1:4010/__fail-create');
     const retryRow = await createTask(page, retryTitle, {due:'2030-06-02', assignee:'Will'});
     const retryId = Number(await retryRow.getAttribute('data-task-id'));
     await expect.poll(async () => (await googleState(request)).jobs.find(j => j.worker === 'To.SyncWorker' && j.args.task_id === retryId)?.state).toBe('retryable');
-    await expect(page.locator('#sync-status')).toHaveAttribute('data-state', 'retrying');
+    await expect(page.locator('#sync-status')).toHaveText('Saved here. Google sync failed; retrying automatically.');
+    await expect(page.locator('#sync-status')).toBeVisible();
+    await expect(retryRow).toBeVisible();
+    await expect(nicole.locator('#sync-status')).toBeVisible();
     await expect(page.locator('[data-task-id] small')).toHaveCount(0);
     // Sync progress remains global when the user looks at a different list.
     await page.getByRole('link', {name:'To do', exact:true}).click();
-    await expect(page.locator('#sync-status')).toHaveAttribute('data-state', 'retrying');
+    await page.reload();
+    await expect(page.locator('#sync-status')).toBeVisible();
+    await page.screenshot({path:'artifacts/e2e/google-sync-failure.png',fullPage:true});
+    await request.post('http://127.0.0.1:4010/__delay-sync-completion',{data:{task_id:retryId}});
     await request.post('http://127.0.0.1:4010/__retry-sync', {data:{title:retryTitle}});
+    await expect.poll(async () => (await googleState(request)).jobs.find(j => j.worker === 'To.SyncWorker' && j.args.task_id === retryId)?.state).toBe('executing');
+    await expect(page.locator('#sync-status')).toBeVisible();
     await expect.poll(async () => (await googleTasks(request, 'will')).filter(t => t.title === retryTitle).length).toBe(1);
     await expect.poll(async () => (await googleState(request)).jobs.find(j => j.worker === 'To.SyncWorker' && j.args.task_id === retryId)?.state).toBe('completed');
-    await expect(page.locator('#sync-status')).toHaveAttribute('data-state', 'idle');
+    for (const tab of [page,nicole]) await expect(tab.locator('#sync-status')).toBeHidden();
     const state = await googleState(request);
     await test.info().attach('google-http-exchange', {body: JSON.stringify(state, null, 2), contentType:'application/json'});
     await page.goto(listUrl);
@@ -788,6 +1069,40 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await test.info().attach('list-deletion-google-and-reminders', {
     body:JSON.stringify({google:await googleState(request), reminders:reminderJobs(activeTitle)},null,2),
     contentType:'application/json'
+  });
+  await test.step('Skip sync jobs for tasks that have no Google copy', async () => {
+    const row = await createTask(page,'Never exported',{description:'Local task'});
+    const id = Number(await row.getAttribute('data-task-id'));
+    await row.getByRole('textbox',{name:'Description',exact:true}).fill('Local edit');
+    await row.getByRole('textbox',{name:'Description',exact:true}).press('Tab');
+    await row.getByRole('checkbox').check();
+    await deleteTask(page,row);
+    const state = await googleState(request);
+    expect(state.jobs.filter(j => j.worker === 'To.SyncWorker' && j.args.task_id === id)).toEqual([]);
+    expect(state.calls.filter(c => JSON.stringify(c.body).includes(`[to task ${id}]`))).toEqual([]);
+  });
+  await test.step('Keep local-only edits and deletions away from Google', async () => {
+    const title = 'Local-only deletion';
+    const row = await createTask(page,title,{due:'2030-10-03',assignee:'Will'});
+    await expect.poll(async () => (await googleTasks(request,'will')).some(t => t.title === title)).toBe(true);
+    await expect(page.locator('#sync-status')).toHaveAttribute('data-state','idle');
+    await request.post('http://127.0.0.1:4010/__google-sync-enabled',{data:{enabled:false}});
+    const before = await googleState(request);
+    await deleteTask(page,row);
+    await createTask(page,'Local-only task',{due:'2030-10-04',assignee:'Will'});
+    await page.reload();
+    await expect(taskRow(page,'Local-only task')).toBeVisible();
+    await expect(page.locator('#sync-status')).toHaveAttribute('data-state','idle');
+    await expect(page.locator('#sync-status')).toBeHidden();
+    await page.getByRole('link',{name:'Settings for Will'}).click();
+    await expect(page.getByText('Google sync is disabled for local development.',{exact:true})).toBeVisible();
+    await expect(page.locator('#google-import-form')).toHaveCount(0);
+    const after = await googleState(request);
+    expect(after.calls).toEqual(before.calls);
+    expect(after.jobs.filter(j => j.worker === 'To.SyncWorker')).toEqual(before.jobs.filter(j => j.worker === 'To.SyncWorker'));
+    expect(Object.values(after.tasks.will).some(t => t.title === title)).toBe(true);
+    await page.screenshot({path:'artifacts/e2e/local-google-sync-disabled.png',fullPage:true});
+    await test.info().attach('local-only-google-calls',{body:JSON.stringify({before:before.calls.length,after:after.calls.length}),contentType:'application/json'});
   });
   await nicoleContext.close();
 });

@@ -7,6 +7,13 @@ defmodule To.Application do
 
   @impl true
   def start(_type, _args) do
+    :telemetry.attach_many(
+      "to-sync-status",
+      [[:oban, :job, :stop], [:oban, :job, :exception]],
+      &To.Sync.handle_job_event/4,
+      nil
+    )
+
     children = [
       ToWeb.Telemetry,
       To.Repo,

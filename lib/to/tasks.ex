@@ -79,7 +79,10 @@ defmodule To.Tasks do
 
   def get_task!(list_id, id) do
     Repo.one!(
-      from(t in Task, where: t.list_id == ^list_id and t.id == ^id and is_nil(t.deleted_at))
+      from(t in Task,
+        where: t.list_id == ^list_id and t.id == ^id and is_nil(t.deleted_at),
+        preload: [:created_by, :updated_by]
+      )
     )
   end
 
@@ -168,7 +171,12 @@ defmodule To.Tasks do
 
           {count, _} =
             Repo.update_all(query,
-              set: [nested_under: new_name, updated_by_id: actor_id, updated_at: now()]
+              set: [
+                nested_under: new_name,
+                updated_by_id: actor_id,
+                updated_at: now(),
+                last_changed_fields: ["nested_under"]
+              ]
             )
 
           count
@@ -183,6 +191,29 @@ defmodule To.Tasks do
   def subscribe_lists, do: Phoenix.PubSub.subscribe(To.PubSub, "lists")
 
   defp write(changeset, operation) do
+    changeset =
+      if operation == :update do
+        fields =
+          [
+            :title,
+            :description,
+            :due_on,
+            :assignee_id,
+            :nested_under,
+            :list_id,
+            :completed_at,
+            :deleted_at
+          ]
+          |> Enum.filter(&Changeset.changed?(changeset, &1))
+          |> Enum.map(&Atom.to_string/1)
+
+        if fields == [],
+          do: Changeset.delete_change(changeset, :updated_by_id),
+          else: Changeset.put_change(changeset, :last_changed_fields, fields)
+      else
+        changeset
+      end
+
     result =
       Repo.transaction(fn ->
         task =
@@ -191,9 +222,11 @@ defmodule To.Tasks do
             {:error, error} -> Repo.rollback(error)
           end
 
-        case task |> To.Sync.enqueue() |> Oban.insert() do
-          {:ok, _} -> :ok
-          {:error, error} -> Repo.rollback(error)
+        if To.Sync.needed?(changeset, task) do
+          case task |> To.Sync.enqueue() |> Oban.insert() do
+            {:ok, _} -> :ok
+            {:error, error} -> Repo.rollback(error)
+          end
         end
 
         case To.Reminders.schedule(task) do

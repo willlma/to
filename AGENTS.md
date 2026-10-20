@@ -12,6 +12,7 @@ Keep this codebase as small as possible. A very simple, ascetic UI is fine.
 - Keep HTML and CSS classes to a minimum. Use semantic elements, native controls,
   shallow markup, and a small amount of styling. Avoid decorative wrappers and
   elaborate visual polish.
+- In HEEx, group related conditional content in one block instead of repeating the same condition on sibling elements.
 - Keep the UI readable, accessible, and usable on phones and with a keyboard.
   Simplicity must preserve essential interaction and accessibility behavior.
 - For the first version, follow conventional LiveView patterns rather than
@@ -19,6 +20,7 @@ Keep this codebase as small as possible. A very simple, ascetic UI is fine.
 
 # Testing
 
+- Test behavior we want to preserve against regressions; avoid tests that unnecessarily lock in incidental formatting.
 - Never write unit tests after writing the implementation.
 - Highly prefer end-to-end tests as the sole testing mechanism. Exercise complex
   features through real user flows rather than restating implementation details.

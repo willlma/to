@@ -21,12 +21,27 @@ defmodule To.E2E.Mock do
           next_id: 1,
           failures: 0,
           token_error: nil,
-          fail_create: false
+          fail_create: false,
+          delayed_sync_task: nil
         }
       end,
       name: __MODULE__
     )
   end
+
+  # Reproduce a slow database acknowledgement after Google work has finished.
+  def delay_sync_completion(_, _, %{job: %{worker: "To.SyncWorker", args: %{"task_id" => id}}}, _) do
+    delay? =
+      Agent.get_and_update(__MODULE__, fn state ->
+        if state.delayed_sync_task == id,
+          do: {true, %{state | delayed_sync_task: nil}},
+          else: {false, state}
+      end)
+
+    if delay?, do: Process.sleep(2_000)
+  end
+
+  def delay_sync_completion(_, _, _, _), do: :ok
 
   get "/authorize" do
     state = conn.params["state"]
@@ -100,6 +115,23 @@ defmodule To.E2E.Mock do
       )
 
     json(conn, 200, Map.put(state, :jobs, jobs))
+  end
+
+  post "/__google-sync-enabled" do
+    enabled = conn.params["enabled"]
+    Application.put_env(:to, :google_sync_enabled, enabled)
+
+    if enabled,
+      do: Oban.resume_queue(queue: :google_sync),
+      else: Oban.pause_queue(queue: :google_sync)
+
+    To.Sync.broadcast_status()
+    json(conn, 200, %{})
+  end
+
+  post "/__delay-sync-completion" do
+    Agent.update(__MODULE__, &%{&1 | delayed_sync_task: conn.params["task_id"]})
+    json(conn, 200, %{})
   end
 
   post "/__fail-create" do
