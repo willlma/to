@@ -171,7 +171,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   expect(titles.findIndex(t => t.includes('No due date'))).toBeLessThan(titles.findIndex(t => t.includes('Friday groceries')));
   expect(titles.findIndex(t => t.includes('No due date'))).toBeLessThan(titles.findIndex(t => t.includes('Thursday produce')));
 
-  await test.step('Show years, highlight overdue tasks, and put distant dates after undated tasks', async () => {
+  await test.step('Show years, highlight overdue dates only, and put distant dates after undated tasks', async () => {
     const today = new Date().toISOString().slice(0, 10);
     const year = Number(today.slice(0, 4));
     const offsetDate = days => {
@@ -197,8 +197,10 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(taskRow(page, 'Today')).not.toHaveClass(/overdue/);
     await page.emulateMedia({colorScheme:'light'});
     await expect(yesterday.locator('.task-date')).toHaveCSS('color', 'rgb(154, 52, 18)');
+    await expect(yesterday.locator('.task-title')).toHaveCSS('color', await taskRow(page, 'Today').locator('.task-title').evaluate(el => getComputedStyle(el).color));
     await page.emulateMedia({colorScheme:'dark'});
     await expect(yesterday.locator('.task-date')).toHaveCSS('color', 'rgb(251, 146, 60)');
+    await expect(yesterday.locator('.task-title')).toHaveCSS('color', await taskRow(page, 'Today').locator('.task-title').evaluate(el => getComputedStyle(el).color));
     await page.emulateMedia({colorScheme:'light'});
     const ordered = await page.locator('[data-task-id] input[name="task[title]"]').evaluateAll(inputs => inputs.map(input => input.value));
     expect(ordered.indexOf('Within 30 days')).toBeLessThan(ordered.indexOf('No due date'));
@@ -241,8 +243,25 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await expect(inGroup(nicole, 'Produce').locator('[data-task-id]').filter({has:nicole.locator('input[value="Friday groceries"]')})).toBeVisible();
   await friday.getByRole('checkbox').dragTo(page.locator('input[data-group="Dairy"]'));
   await expect(inGroup(page, 'Dairy').locator('input[value="Friday groceries"]')).toBeVisible();
-  await plain.getByRole('checkbox').dragTo(page.locator('#ungroup-target'));
+  await test.step('Highlight one target around all ungrouped tasks', async () => {
+    const ungrouped = page.locator('section[data-drop-group=""]');
+    await expect(ungrouped).toHaveCount(1);
+    await expect(ungrouped.locator('[data-task-id]')).toHaveCount(3);
+    await expect(page.locator('#ungroup-target')).toHaveCount(0);
+    const grip = await plain.getByRole('checkbox').boundingBox();
+    const target = await taskRow(page, 'Earlier ungrouped').boundingBox();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, {steps:8});
+    await expect(ungrouped).toHaveClass('drop-target');
+    await expect(ungrouped).toHaveCSS('outline-style', 'dashed');
+    await expect(page.locator('.drop-target')).toHaveCount(1);
+    await expect(ungrouped.locator('.drop-target')).toHaveCount(0);
+    await page.screenshot({path:'artifacts/e2e/ungrouped-drop-target.png',fullPage:true});
+    await page.mouse.up();
+  });
   await expect(plain).toHaveAttribute('data-group', '');
+  await expect(taskRow(nicole, 'No due date')).toHaveAttribute('data-group', '');
   // The same move is available to keyboard users without another menu.
   await plain.getByRole('checkbox').press('Alt+ArrowDown');
   await expect(plain).not.toHaveAttribute('data-group', '');
@@ -522,6 +541,30 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   expect(Math.abs(compact.descriptionLeft-compact.titleLeft)).toBeLessThan(1);
   await expect(plain.getByRole('textbox', {name:'Description', exact:true})).not.toHaveAttribute('placeholder');
   await page.screenshot({path:'artifacts/e2e/mobile-list.png', fullPage:true});
+
+  await test.step('Hide compact description scrollbars and scroll while editing', async () => {
+    const description = plain.getByRole('textbox', {name:'Description', exact:true});
+    const original = await description.inputValue();
+    const longDescription = Array.from({length:12}, (_, i) => `Description line ${i + 1}`).join('\n');
+    await description.fill(longDescription);
+    await description.press('Tab');
+    await expect(description).toHaveCSS('overflow-y', 'hidden');
+    await page.screenshot({path:'artifacts/e2e/compact-description.png',fullPage:true});
+    await description.click();
+    await expect(description).toHaveCSS('overflow-y', 'auto');
+    await expect(description).toHaveCSS('height', '80px');
+    expect(await description.evaluate(el => {
+      el.scrollTop = el.scrollHeight;
+      return el.scrollTop;
+    })).toBeGreaterThan(0);
+    await description.press('Tab');
+    await plain.getByRole('textbox', {name:'Title',exact:true}).click();
+    await expect(plain.getByRole('textbox', {name:'Title',exact:true})).toBeFocused();
+    await expect(page.locator('#task-dialog')).toBeHidden();
+    await expect(description).toHaveCSS('overflow-y', 'hidden');
+    await description.fill(original);
+    await description.press('Tab');
+  });
 
   await test.step('Preserve the draft in a full-screen dialog', async () => {
     const row = milkRow;

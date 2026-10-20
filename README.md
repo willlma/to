@@ -60,7 +60,7 @@ Compile before bundling assets so LiveView can generate both manifests.
   calendar icon. Assignees show W or N in an outlined circle; unassigned tasks
   show the same circle empty.
   Drag from a task's checkbox to a group to change its group, or outside the group
-  into the task area, the No group drop area, or the current list link to ungroup it.
+  into the shared ungrouped tasks section or onto the current list link to ungroup it.
   Drop on another list link to move it to that list and clear its group, preserving
   the task's other details. With the checkbox focused, Alt+Up/Down moves between
   groups; Alt+Left/Right moves between lists. Tasks still sort by due date.
@@ -73,8 +73,8 @@ Compile before bundling assets so LiveView can generate both manifests.
   dates within the next 30 days precede undated tasks; dates more than 30 days away
   follow undated tasks. Groups stay together, ordered by their first task in this order;
   each group's tasks use the same deadline ordering. Equal dates use creation time/id.
-  Dates outside the current UTC year include the year. Incomplete overdue tasks
-  use dark orange, with a lighter shade in dark mode. No position column; undated
+  Dates outside the current UTC year include the year. Dates on incomplete overdue
+  tasks use dark orange, with a lighter shade in dark mode. No position column; undated
   ordering is provisional.
 - Group names save after a pause or on blur. A collision opens a merge-or-rename
   dialog. Clearing a name ungroups its tasks.

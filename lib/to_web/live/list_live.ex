@@ -269,10 +269,12 @@ defmodule ToWeb.ListLive do
   end
 
   # Ungrouped tasks come first; each section keeps its existing due-date order.
+  defp groups([]), do: []
+
   defp groups(tasks) do
     tasks
-    |> Enum.reduce([], fn task, groups ->
-      key = task.nested_under || {:task, task.id}
+    |> Enum.reduce([{nil, []}], fn task, groups ->
+      key = task.nested_under
 
       case Enum.find_index(groups, fn {name, _} -> name == key end) do
         nil -> groups ++ [{key, [task]}]
@@ -338,14 +340,15 @@ defmodule ToWeb.ListLive do
       [data-task-id] > form { display: contents; }
       [data-task-id] form > input, [data-task-id] textarea { width: 100%; min-width: 0; box-sizing: border-box; border: 0; padding: 0; }
       .task-title { grid-area: 1 / 2; line-height: 1.2; }
-      [data-task-id] textarea { grid-area: 2 / 2; min-height: .9rem; height: .9rem; margin: 0; font-size: .75rem; line-height: 1.2; color: light-dark(#6b6b6b, #aaa); }
+      [data-task-id] textarea { grid-area: 2 / 2; min-height: .9rem; height: .9rem; margin: 0; font-size: .75rem; line-height: 1.2; color: light-dark(#6b6b6b, #aaa); overflow: hidden; }
+      [data-task-id] textarea:focus { overflow: auto; }
       [data-task-id] textarea::placeholder { color: inherit; opacity: 1; }
       .task-assignee { grid-area: 1 / 3; position: relative; margin: 0; }
       .task-assignee select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
       .task-assignee:has(select:focus-visible) .person-circle { border-color: light-dark(#706b60, #c4beae); }
       .task-assignee span { pointer-events: none; }
       .task-date { grid-area: 1 / 4; position: relative; display: flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; margin: 0; font-size: .72rem; }
-      .overdue .task-title, .overdue .task-date { color: light-dark(#9a3412, #fb923c); }
+      .overdue .task-date { color: light-dark(#9a3412, #fb923c); }
       .task-date input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
       .task-date input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; cursor: pointer; }
       .task-date:has(input:focus-visible) { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
@@ -496,12 +499,11 @@ defmodule ToWeb.ListLive do
       .task-entry input { flex: 1; min-width: 0; }
       .task-entry button { flex-shrink: 0; }
       body:has(#task-dialog[open]) { overflow: hidden; }
-      #ungroup-target { padding: .5rem 0; font-size: .8rem; color: light-dark(#6b6b6b, #aaa); }
-      .dragging-task #ungroup-target { outline: 1px dashed #888; }
+      section[data-drop-group=""] { min-height: 2rem; }
         #task-form fieldset { border: 0; margin: 0; padding: 0; }
         #task-form > [role="alert"] { flex-basis: 100%; margin: 0; }
         .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
-        .grouped { margin-left: .75rem; }
+        .grouped { margin-left: .75rem; margin-top: .25rem; }
         form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
         form[id^="group-"] button { border: 0; padding: .15rem .3rem; }
         form[id^="group-"] input { border-color: transparent; font-weight: bold; width: auto; min-width: 0; max-width: calc(100% - 2rem); padding: .15rem 0; }
@@ -723,48 +725,46 @@ defmodule ToWeb.ListLive do
           }
         }
       </script>
-      <div id="task-groups" data-drop-group="">
-        <p id="ungroup-target" data-drop-group="">No group · Drop a task here to ungroup</p>
-        <p :if={@groups == []}>Nothing to do.</p>
-        <section
-          :for={{group, items} <- @groups}
-          data-drop-group={if is_binary(group), do: group, else: ""}
+      <p :if={@groups == []}>Nothing to do.</p>
+      <section
+        :for={{group, items} <- @groups}
+        aria-label={if is_nil(group), do: "Ungrouped tasks"}
+        data-drop-group={if is_binary(group), do: group, else: ""}
+      >
+        <.form
+          :if={is_binary(group)}
+          for={%{}}
+          id={"group-#{Enum.min_by(items, & &1.id).id}"}
+          phx-change="rename-group"
         >
-          <.form
-            :if={is_binary(group)}
-            for={%{}}
-            id={"group-#{Enum.min_by(items, & &1.id).id}"}
-            phx-change="rename-group"
-          >
-            <input type="hidden" name="group[old]" value={group} />
-            <input
-              name="group[name]"
-              value={group}
-              aria-label="Group name"
-              size={max(String.length(group), 1)}
-              data-group={group}
-              maxlength="100"
-              phx-debounce="400"
-              phx-blur="rename-group-blur"
-              phx-value-old={group}
-            />
-            <button
-              type="button"
-              phx-click="open-task"
-              phx-value-group={group}
-              aria-label={"Add todo to #{group}"}
-            >+</button>
-          </.form>
-          <ul class={if is_binary(group), do: "grouped"}>
-            <.task_row
-              :for={task <- items}
-              task={task}
-              users={@users}
-              errors={@inline_errors[task.id] || []}
-            />
-          </ul>
-        </section>
-      </div>
+          <input type="hidden" name="group[old]" value={group} />
+          <input
+            name="group[name]"
+            value={group}
+            aria-label="Group name"
+            size={max(String.length(group), 1)}
+            data-group={group}
+            maxlength="100"
+            phx-debounce="400"
+            phx-blur="rename-group-blur"
+            phx-value-old={group}
+          />
+          <button
+            type="button"
+            phx-click="open-task"
+            phx-value-group={group}
+            aria-label={"Add todo to #{group}"}
+          >+</button>
+        </.form>
+        <ul class={if is_binary(group), do: "grouped"}>
+          <.task_row
+            :for={task <- items}
+            task={task}
+            users={@users}
+            errors={@inline_errors[task.id] || []}
+          />
+        </ul>
+      </section>
       <details :if={@completed_tasks != []} id="completed-tasks">
         <summary>Completed ({length(@completed_tasks)})</summary><ul>
           <.task_row
@@ -820,7 +820,6 @@ defmodule ToWeb.ListLive do
           window.addEventListener("keydown", this.keydown)
           this.clearDrag = () => {
             if (!this.drag) return
-            this.el.classList.remove("dragging-task")
             this.drag.row.classList.remove("dragging")
             this.drag.target?.classList.remove("drop-target")
             if (this.drag.grip.hasPointerCapture(this.drag.pointerId)) {
@@ -842,7 +841,6 @@ defmodule ToWeb.ListLive do
             drag.active = true
             event.preventDefault()
             drag.row.classList.add("dragging")
-            this.el.classList.add("dragging-task")
             const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-group], [data-drop-list]")
             drag.target?.classList.remove("drop-target")
             drag.target = this.el.contains(target) ? target : null
