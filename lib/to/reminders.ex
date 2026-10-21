@@ -11,6 +11,50 @@ defmodule To.Reminders do
     end)
   end
 
+  def notify_assignment(%Task{assignee_id: nil}), do: :ok
+  def notify_assignment(%Task{assignee_id: id, created_by_id: id}), do: :ok
+
+  # Called after the task transaction commits; delivery cannot undo the save.
+  def notify_assignment(task) do
+    subscriptions = Repo.all(from s in PushSubscription, where: s.user_id == ^task.assignee_id)
+
+    cond do
+      subscriptions == [] ->
+        {:error, :not_subscribed}
+
+      !configured?() ->
+        {:error, :not_configured}
+
+      true ->
+        payload =
+          Jason.encode!(%{
+            title: "#{task.created_by.name} assigned you a task",
+            body: task.title,
+            tag: "assignment-#{task.id}",
+            url: "/lists/#{task.list_id}"
+          })
+
+        results =
+          Enum.map(subscriptions, fn subscription ->
+            ReminderWorker.send_notification(subscription, payload,
+              ttl: 3600,
+              topic: "assignment-#{task.id}"
+            )
+          end)
+
+        cond do
+          :ok in results ->
+            :ok
+
+          Enum.all?(results, &(&1 == {:error, :subscription_expired})) ->
+            {:error, :not_subscribed}
+
+          true ->
+            {:error, :delivery_failed}
+        end
+    end
+  end
+
   # Called in the same transaction as task writes; no network work happens here.
   def schedule(task) do
     Oban.cancel_all_jobs(

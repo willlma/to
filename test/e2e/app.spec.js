@@ -98,7 +98,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     endpoint:'https://fcm.googleapis.com/e2e',
     keys:{p256dh:deviceKey.getPublicKey().toString('base64url'),auth:randomBytes(16).toString('base64url')}
   };
-  await page.context().addInitScript(subscription => {
+  const mockNotifications = subscription => {
     Object.defineProperty(Notification, 'permission', {
       get:() => localStorage.getItem('e2e-notification-permission') || 'default'
     });
@@ -114,7 +114,8 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
       localStorage.setItem('e2e-push-enabled','true');
       return current();
     };
-  }, deviceSubscription);
+  };
+  await page.context().addInitScript(mockNotifications, deviceSubscription);
   await test.step('Reject unauthorized sign-in', async () => {
     await page.goto('/auth/google');
     await page.getByRole('link', {name:'Continue as Stranger'}).click();
@@ -187,6 +188,8 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   });
 
   const nicoleContext = await browser.newContext({viewport:{width:390,height:844}, isMobile:true, hasTouch:true});
+  const nicoleSubscription = {...deviceSubscription, endpoint:'https://fcm.googleapis.com/nicole-e2e'};
+  await nicoleContext.addInitScript(mockNotifications, nicoleSubscription);
   const nicole = await nicoleContext.newPage();
   await signIn(nicole, 'Nicole');
   await expect(page.locator('#list-name')).toBeHidden();
@@ -1103,6 +1106,56 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     expect(Object.values(after.tasks.will).some(t => t.title === title)).toBe(true);
     await page.screenshot({path:'artifacts/e2e/local-google-sync-disabled.png',fullPage:true});
     await test.info().attach('local-only-google-calls',{body:JSON.stringify({before:before.calls.length,after:after.calls.length}),contentType:'application/json'});
+  });
+  await test.step('Notify the other assignee on creation and surface notification failures without losing tasks', async () => {
+    const listUrl = new URL(lastListUrl, page.url()).href;
+    await page.goto(listUrl);
+    await nicole.goto(listUrl);
+    const before = (await googleState(request)).pushes.length;
+    const missing = await createTask(page,'Assignment without notifications',{assignee:'Nicole'});
+    await expect(page.getByRole('alert')).toHaveText("Task saved, but Nicole doesn't have notifications set up.");
+    await expect(taskRow(nicole,'Assignment without notifications')).toBeVisible();
+    await page.screenshot({path:'artifacts/e2e/assignment-notifications-missing.png',fullPage:true});
+    await page.reload();
+    await expect(missing).toBeVisible();
+
+    await createTask(page,'Self-assigned task',{assignee:'Will'});
+    await createTask(page,'Unassigned task');
+    await createTask(nicole,'Self-assigned without notifications',{assignee:'Nicole'});
+    for (const tab of [page,nicole]) await expect(tab.locator('#notification-error')).toHaveCount(0);
+    expect((await googleState(request)).pushes).toHaveLength(before);
+
+    const assigned = await createTask(nicole,'Nicole assigned Will an undated task',{assignee:'Will'});
+    await expect.poll(async () => (await googleState(request)).pushes.filter(p => p.payload.body === 'Nicole assigned Will an undated task').length).toBe(1);
+    const push = (await googleState(request)).pushes.at(-1);
+    expect(push).toMatchObject({endpoint:deviceSubscription.endpoint,payload:{title:'Nicole assigned you a task',body:'Nicole assigned Will an undated task',url:new URL(listUrl).pathname}});
+    await assigned.getByRole('button',{name:/^Edit /}).click();
+    await nicole.locator('#task-description').fill('Editing should not notify again');
+    await nicole.getByRole('button',{name:'Save',exact:true}).click();
+    await expect(nicole.getByRole('dialog')).toBeHidden();
+    expect((await googleState(request)).pushes).toHaveLength(before + 1);
+
+    await nicole.getByRole('link',{name:'Settings for Nicole'}).click();
+    await nicole.getByRole('button',{name:'Enable notifications',exact:true}).click();
+    await expect(nicole.getByRole('button',{name:'Test notification',exact:true})).toBeEnabled();
+    await nicole.goto(listUrl);
+    await createTask(page,'Will assigned Nicole a task',{assignee:'Nicole'});
+    await expect.poll(async () => (await googleState(request)).pushes.filter(p => p.payload.body === 'Will assigned Nicole a task').length).toBe(1);
+    expect((await googleState(request)).pushes.at(-1)).toMatchObject({endpoint:nicoleSubscription.endpoint,payload:{title:'Will assigned you a task'}});
+    await expect(page.locator('#notification-error')).toHaveCount(0);
+
+    await request.post('http://127.0.0.1:4010/__push-response',{data:{status:503}});
+    await createTask(page,'Saved despite failed notification',{assignee:'Nicole'});
+    await expect(page.getByRole('alert')).toHaveText("Task saved, but couldn't notify Nicole.");
+    await expect(taskRow(nicole,'Saved despite failed notification')).toBeVisible();
+    await request.post('http://127.0.0.1:4010/__push-response',{data:{status:410}});
+    await createTask(page,'Expired notification subscription',{assignee:'Nicole'});
+    await expect(page.getByRole('alert')).toHaveText("Task saved, but Nicole doesn't have notifications set up.");
+    await expect(taskRow(nicole,'Expired notification subscription')).toBeVisible();
+    await page.screenshot({path:'artifacts/e2e/assignment-notifications-expired.png',fullPage:true});
+    await test.info().attach('assignment-notifications',{body:JSON.stringify((await googleState(request)).pushes.slice(before),null,2),contentType:'application/json'});
+    await page.getByRole('link',{name:'Settings for Will'}).click();
+    await expect(page.getByRole('heading',{name:'Settings',exact:true})).toBeVisible();
   });
   await nicoleContext.close();
 });

@@ -18,6 +18,7 @@ defmodule To.E2E.Mock do
           calls: [],
           pushes: [],
           encrypted_pushes: [],
+          push_response: nil,
           next_id: 1,
           failures: 0,
           token_error: nil,
@@ -219,10 +220,18 @@ defmodule To.E2E.Mock do
     )
 
     if encoding == "aes128gcm" && vapid && valid_body && valid_topic do
-      send_resp(conn, 201, "")
+      status =
+        Agent.get_and_update(__MODULE__, &{&1.push_response || 201, %{&1 | push_response: nil}})
+
+      send_resp(conn, status, "")
     else
       json(conn, 400, %{error: "invalid encrypted push request"})
     end
+  end
+
+  post "/__push-response" do
+    Agent.update(__MODULE__, &%{&1 | push_response: conn.params["status"]})
+    json(conn, 200, %{})
   end
 
   post "/__push" do

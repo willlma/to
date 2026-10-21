@@ -22,6 +22,7 @@ defmodule ToWeb.ListLive do
        show_list_form: false,
        merge: nil,
        inline_errors: %{},
+       notification_error: nil,
        notice: nil
      )}
   end
@@ -115,10 +116,25 @@ defmodule ToWeb.ListLive do
 
   def handle_event("create", %{"task" => attrs}, socket) do
     case Tasks.create_task(socket.assigns.current_user, socket.assigns.list.id, attrs) do
-      {:ok, _task} ->
+      {:ok, task} ->
+        notification_error =
+          case To.Reminders.notify_assignment(task) do
+            :ok ->
+              nil
+
+            {:error, :not_subscribed} ->
+              "Task saved, but #{task.assignee.name} doesn't have notifications set up."
+
+            {:error, :not_configured} ->
+              "Task saved, but notifications aren't configured on the server."
+
+            {:error, _} ->
+              "Task saved, but couldn't notify #{task.assignee.name}."
+          end
+
         {:noreply,
          socket
-         |> assign(form: task_form(), notice: nil)
+         |> assign(form: task_form(), notice: nil, notification_error: notification_error)
          |> load_tasks()
          |> push_event("task-saved", %{})}
 
@@ -680,6 +696,7 @@ defmodule ToWeb.ListLive do
         enterkeyhint="done"
         autofocus
       />
+      <p :if={@notification_error} id="notification-error" role="alert">{@notification_error}</p>
       <p id="sync-status" role="status" data-state={@sync_status} hidden={@sync_status == :idle}>
         {sync_label(@sync_status)}
       </p>

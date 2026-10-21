@@ -125,6 +125,11 @@ Compile before bundling assets so LiveView can generate both manifests.
 - Assigned tasks get a day-before push at each person's configurable reminder
   time, using each subscribed browser's timezone. Unassigned tasks have no reminder.
   Rescheduling/completion cancels obsolete jobs; already elapsed reminders are skipped.
+- Creating a task assigned to the other person sends a push to their subscribed
+  browsers, even without a due date. Self-assigned and unassigned tasks stay silent;
+  edits and imports do not send assignment notifications. Delivery runs after the
+  task commits. Missing or expired subscriptions and delivery failures show an error
+  to the creator while keeping the task saved.
 - A dropped connection preserves the live form through LiveView recovery. Closing
   or reloading the page does not promise draft recovery. Concurrent edits use the
   last saved values; there is no conflict-resolution interface in this first pass.
