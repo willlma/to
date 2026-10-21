@@ -20,6 +20,10 @@ defmodule ToWeb.ListLive do
        editing_task: nil,
        new_task_form: nil,
        show_list_form: false,
+       list_form: nil,
+       current_path: nil,
+       dialog_back: false,
+       task_dialog_open: false,
        merge: nil,
        inline_errors: %{},
        notification_error: nil,
@@ -27,8 +31,9 @@ defmodule ToWeb.ListLive do
      )}
   end
 
-  def handle_params(params, _uri, socket) do
+  def handle_params(params, uri, socket) do
     lists = Tasks.list_lists()
+    previous_path = socket.assigns.current_path
 
     list =
       case params["id"] do
@@ -36,7 +41,7 @@ defmodule ToWeb.ListLive do
         id -> Tasks.get_list(id) || hd(lists)
       end
 
-    if connected?(socket) do
+    if connected?(socket) && socket.assigns[:list] != list do
       if socket.assigns[:list],
         do: Phoenix.PubSub.unsubscribe(To.PubSub, "tasks:#{socket.assigns.list.id}")
 
@@ -44,16 +49,70 @@ defmodule ToWeb.ListLive do
     end
 
     socket =
+      if socket.assigns.editing_task do
+        assign(socket,
+          form: socket.assigns.new_task_form || task_form(),
+          editing_task: nil,
+          new_task_form: nil
+        )
+      else
+        socket
+      end
+
+    socket =
       socket
-      |> assign(lists: lists, list: list, show_list_form: false, inline_errors: %{}, merge: nil)
+      |> assign(
+        lists: lists,
+        list: list,
+        show_list_form: false,
+        list_form: nil,
+        task_dialog_open: false,
+        current_path: URI.parse(uri).path,
+        dialog_back:
+          socket.assigns.live_action != :index && previous_path in ["/lists", "/lists/#{list.id}"],
+        inline_errors: %{},
+        merge: nil
+      )
       |> load_tasks()
 
     socket =
       if params["id"] && params["id"] != to_string(list.id),
-        do: push_patch(socket, to: ~p"/lists/#{list.id}"),
-        else: socket
+        do: socket |> apply_action(:index, params) |> push_patch(to: ~p"/lists", replace: true),
+        else: apply_action(socket, socket.assigns.live_action, params)
 
     {:noreply, socket}
+  end
+
+  defp apply_action(socket, :index, _params),
+    do: push_event(socket, "task-edit-closed", %{})
+
+  defp apply_action(socket, :edit, _params) do
+    socket
+    |> assign(list_form: socket.assigns.list |> Tasks.change_list() |> to_form(), notice: nil)
+    |> push_event("task-edit-closed", %{})
+  end
+
+  defp apply_action(socket, :new_task, _params) do
+    socket |> assign(task_dialog_open: true) |> push_event("open-task", %{})
+  end
+
+  defp apply_action(socket, :edit_task, %{"task_id" => id}) do
+    case Tasks.get_task(socket.assigns.list.id, id) do
+      nil ->
+        socket
+        |> apply_action(:index, %{})
+        |> push_patch(to: ~p"/lists/#{socket.assigns.list.id}", replace: true)
+
+      task ->
+        socket
+        |> assign(
+          task_dialog_open: true,
+          editing_task: task,
+          new_task_form: socket.assigns.form,
+          form: task |> Tasks.change_task() |> to_form(as: :task)
+        )
+        |> push_event("open-task", %{id: task.id})
+    end
   end
 
   def handle_event("validate", %{"task" => attrs}, socket) do
@@ -73,24 +132,21 @@ defmodule ToWeb.ListLive do
 
   def handle_event("open-task", %{"group" => group}, socket) do
     {:noreply,
-     socket |> assign(form: task_form(%{nested_under: group})) |> push_event("open-task", %{})}
+     socket
+     |> assign(form: task_form(%{nested_under: group}))
+     |> push_patch(to: ~p"/lists/#{socket.assigns.list.id}/tasks/new")}
+  end
+
+  def handle_event("new-task", _, socket) do
+    {:noreply, push_patch(socket, to: ~p"/lists/#{socket.assigns.list.id}/tasks/new")}
   end
 
   def handle_event("edit-task", %{"id" => id}, socket) do
-    task = Tasks.get_task!(socket.assigns.list.id, id)
-
-    {:noreply,
-     socket
-     |> assign(
-       editing_task: task,
-       new_task_form: socket.assigns.form,
-       form: task |> Tasks.change_task() |> to_form(as: :task)
-     )
-     |> push_event("open-task", %{id: task.id})}
+    {:noreply, push_patch(socket, to: ~p"/lists/#{socket.assigns.list.id}/tasks/#{id}/edit")}
   end
 
   def handle_event("cancel-edit", _, socket) do
-    {:noreply, close_edit(socket)}
+    {:noreply, close_dialog(socket)}
   end
 
   def handle_event("update-task", %{"task" => attrs}, socket) do
@@ -107,7 +163,7 @@ defmodule ToWeb.ListLive do
 
     case result do
       {:ok, _task} ->
-        {:noreply, socket |> close_edit() |> load_tasks()}
+        {:noreply, socket |> load_tasks() |> close_dialog()}
 
       {:error, changeset} ->
         {:noreply, assign(socket, form: to_form(changeset, as: :task))}
@@ -136,7 +192,8 @@ defmodule ToWeb.ListLive do
          socket
          |> assign(form: task_form(), notice: nil, notification_error: notification_error)
          |> load_tasks()
-         |> push_event("task-saved", %{})}
+         |> push_event("task-saved", %{})
+         |> close_dialog()}
 
       {:error, changeset} ->
         {:noreply, assign(socket, form: to_form(changeset, as: :task))}
@@ -157,10 +214,28 @@ defmodule ToWeb.ListLive do
   def handle_event("toggle-list-form", _, socket),
     do: {:noreply, assign(socket, show_list_form: !socket.assigns.show_list_form)}
 
+  def handle_event("edit-list", _, socket) do
+    {:noreply, push_patch(socket, to: ~p"/lists/#{socket.assigns.list.id}/edit")}
+  end
+
+  def handle_event("cancel-list-edit", _, socket),
+    do: {:noreply, close_dialog(socket)}
+
+  def handle_event("rename-list", %{"list" => %{"name" => name}}, socket) do
+    case Tasks.rename_list(socket.assigns.list, name) do
+      {:ok, list} ->
+        {:noreply,
+         socket |> assign(list: list, lists: Tasks.list_lists(), notice: nil) |> close_dialog()}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, list_form: to_form(changeset))}
+    end
+  end
+
   def handle_event("delete-list", _, socket) do
     case Tasks.delete_list(socket.assigns.current_user, socket.assigns.list) do
       {:ok, _} ->
-        {:noreply, push_patch(socket, to: ~p"/lists")}
+        {:noreply, push_patch(socket, to: ~p"/lists", replace: true)}
 
       {:error, :last_list} ->
         {:noreply, assign(socket, notice: "Keep at least one list.")}
@@ -230,7 +305,7 @@ defmodule ToWeb.ListLive do
     socket =
       if match?({:ok, _}, outcome) && socket.assigns.editing_task &&
            socket.assigns.editing_task.id == task.id,
-         do: close_edit(socket),
+         do: close_dialog(socket),
          else: socket
 
     {:noreply, result(socket, outcome)}
@@ -270,9 +345,10 @@ defmodule ToWeb.ListLive do
     socket = assign(socket, lists: lists)
 
     socket =
-      if Enum.any?(lists, &(&1.id == socket.assigns.list.id)),
-        do: socket,
-        else: push_patch(socket, to: ~p"/lists")
+      case Enum.find(lists, &(&1.id == socket.assigns.list.id)) do
+        nil -> push_patch(socket, to: ~p"/lists", replace: true)
+        list -> assign(socket, list: list)
+      end
 
     {:noreply, socket}
   end
@@ -311,10 +387,12 @@ defmodule ToWeb.ListLive do
     )
   end
 
-  defp close_edit(socket) do
-    socket
-    |> assign(form: socket.assigns.new_task_form, editing_task: nil, new_task_form: nil)
-    |> push_event("task-edit-closed", %{})
+  defp close_dialog(socket) do
+    socket = assign(socket, notice: nil)
+
+    if socket.assigns.dialog_back,
+      do: socket |> assign(dialog_back: false) |> push_event("dialog-back", %{}),
+      else: push_patch(socket, to: ~p"/lists/#{socket.assigns.list.id}", replace: true)
   end
 
   defp load_tasks(socket) do
@@ -470,7 +548,7 @@ defmodule ToWeb.ListLive do
       .task-date input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; cursor: pointer; }
       .task-date:has(input:focus-visible) { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
       .task-date span { white-space: nowrap; padding: 0 .15rem; pointer-events: none; }
-      [data-task-id] svg, #task-dialog svg { width: .9rem; height: .9rem; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 1.5; pointer-events: none; }
+      [data-task-id] svg, #task-dialog svg, #edit-list svg, #list-edit-dialog svg { width: .9rem; height: .9rem; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 1.5; pointer-events: none; }
       [data-task-id] > small, [data-task-id] > p { grid-column: 1 / -1; margin: .25rem 0; }
       [data-task-id] > button { grid-area: 1 / 5; padding: .2rem .3rem; border: 0; }
       .dragging { opacity: .45; }
@@ -552,9 +630,7 @@ defmodule ToWeb.ListLive do
         aria-label={"Edit #{@task.title}"}
         title="Edit todo"
       >
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="m16 4 4 4M4 20l4-1L20 7a2.1 2.1 0 0 0-3-3L5 16Z" />
-        </svg>
+        <.pen_icon />
       </button>
       <p :for={error <- @errors} role="alert">{error}</p>
     </li>
@@ -616,17 +692,20 @@ defmodule ToWeb.ListLive do
         nav > * { flex-shrink: 0; white-space: nowrap; }
         nav button { border: 0; }
         [aria-current="page"] { font-weight: bold; }
-        #quick-title, #task-title { width: 100%; box-sizing: border-box; }
+        #quick-title, #task-title, #list-edit-name { width: 100%; box-sizing: border-box; }
         #quick-title { margin: 1rem 0; }
         #task-dialog { position: fixed; inset: var(--task-top, 0px) 0 0; box-sizing: border-box; margin: 0; padding: 0 .5rem; border: 0; border-radius: 0; width: 100%; height: calc(100vh - var(--task-top, 0px)); height: calc(100dvh - var(--task-top, 0px)); max-width: none; max-height: none; overflow-y: auto; }
       #task-form { display: block; max-width: 44rem; margin: 0 auto; }
       .task-entry { display: flex; align-items: center; gap: .5rem; }
       .task-entry input { flex: 1; min-width: 0; }
       .task-entry button { flex-shrink: 0; }
-      .task-actions { display: flex; justify-content: space-between; align-items: center; }
-      .task-actions [phx-click="delete"] { border: 0; }
-      .task-actions [phx-click="delete"]:focus-visible { outline: 1px solid currentColor; }
-      #task-dialog .task-actions svg { width: 1.5rem; height: 1.5rem; }
+      .dialog-actions { display: flex; gap: .5rem; align-items: center; }
+      .dialog-actions [phx-click^="delete"] { border: 0; margin-left: auto; }
+      .dialog-actions [phx-click^="delete"]:focus-visible { outline: 1px solid currentColor; }
+      #task-dialog .dialog-actions svg, #list-edit-dialog .dialog-actions svg { width: 1.5rem; height: 1.5rem; }
+      #edit-list { padding: .2rem .3rem; margin-left: -.5rem; }
+      #list-edit-dialog { width: min(26rem, calc(100% - 2rem)); box-sizing: border-box; }
+      #list-edit-dialog .dialog-actions { margin-top: 1rem; }
       body:has(#task-dialog[open]) { overflow: hidden; }
       section[data-drop-group=""] { min-height: 2rem; }
         #task-form fieldset { border: 0; margin: 0; padding: 0; }
@@ -642,18 +721,27 @@ defmodule ToWeb.ListLive do
     <main id="to-app" phx-hook=".QuickEntry">
       <header>
         <nav aria-label="Lists">
-          <.link
-            :for={list <- @lists}
-            patch={~p"/lists/#{list.id}"}
-            aria-current={if list.id == @list.id, do: "page"}
-            data-drop-list={list.id}
-            data-drop-group={if list.id == @list.id, do: ""}
-            title={
-              if list.id == @list.id,
-                do: "Drop a task here to remove its group",
-                else: "Drop a task here to move it to #{list.name}"
-            }
-          >{list.name}</.link>
+          <%= for list <- @lists do %>
+            <.link
+              patch={~p"/lists/#{list.id}"}
+              aria-current={if list.id == @list.id, do: "page"}
+              data-drop-list={list.id}
+              data-drop-group={if list.id == @list.id, do: ""}
+              title={
+                if list.id == @list.id,
+                  do: "Drop a task here to remove its group",
+                  else: "Drop a task here to move it to #{list.name}"
+              }
+            >{list.name}</.link>
+            <button
+              :if={list.id == @list.id}
+              id="edit-list"
+              type="button"
+              phx-click="edit-list"
+              aria-label={"Edit list #{list.name}"}
+              title="Edit list"
+            ><.pen_icon /></button>
+          <% end %>
           <button
             type="button"
             phx-click="toggle-list-form"
@@ -662,13 +750,6 @@ defmodule ToWeb.ListLive do
             aria-controls="list-form"
           >+</button>
         </nav>
-        <button
-          :if={length(@lists) > 1}
-          type="button"
-          phx-click="delete-list"
-          data-confirm={"Delete “#{@list.name}” and all its tasks? This cannot be undone."}
-          aria-label={"Delete list #{@list.name}"}
-        >Delete list</button>
         <.link navigate={~p"/settings"} aria-label={"Settings for #{@current_user.name}"}>
           <.person_circle user={@current_user} />
         </.link>
@@ -676,7 +757,58 @@ defmodule ToWeb.ListLive do
       <p id="connection-status" role="status" hidden>
         Reconnecting… Your changes will need a connection.
       </p>
-      <p :if={@notice} role="status">{@notice}</p>
+      <p :if={@notice && !@list_form} role="status">{@notice}</p>
+      <dialog
+        :if={@list_form}
+        id="list-edit-dialog"
+        phx-hook=".ListDialog"
+        phx-mounted={JS.ignore_attributes(["open"])}
+        aria-label="Edit list"
+      >
+        <.form for={@list_form} id="list-edit-form" phx-submit="rename-list">
+          <input
+            id="list-edit-name"
+            aria-label="List name"
+            name={@list_form[:name].name}
+            value={@list_form[:name].value}
+            aria-describedby="list-edit-name-errors"
+            required
+            maxlength="100"
+          />
+          <.field_errors field={@list_form[:name]} id="list-edit-name-errors" label="List name" />
+          <p :if={@notice} role="alert">{@notice}</p>
+          <div class="dialog-actions">
+            <button phx-disable-with="Saving…">Save</button>
+            <button type="button" phx-click="cancel-list-edit">Cancel</button>
+            <button
+              :if={length(@lists) > 1}
+              type="button"
+              phx-click="delete-list"
+              data-confirm={"Delete “#{@list.name}” and all its tasks? This cannot be undone."}
+              aria-label={"Delete list #{@list.name}"}
+              title="Delete list"
+            ><.trash_icon /></button>
+          </div>
+        </.form>
+      </dialog>
+      <script :type={Phoenix.LiveView.ColocatedHook} name=".ListDialog">
+        export default {
+          mounted() {
+            this.el.showModal()
+            const name = this.el.querySelector("input")
+            name.focus()
+            name.select()
+            this.el.addEventListener("cancel", event => {
+              event.preventDefault()
+              this.pushEvent("cancel-list-edit", {})
+            })
+            this.el.addEventListener("click", event => {
+              if (event.target === this.el) this.pushEvent("cancel-list-edit", {})
+            })
+          },
+          destroyed() { document.getElementById("edit-list")?.focus({preventScroll: true}) }
+        }
+      </script>
       <.form
         :if={@show_list_form}
         for={%{}}
@@ -704,6 +836,8 @@ defmodule ToWeb.ListLive do
         id="task-dialog"
         phx-hook=".TaskDialog"
         phx-mounted={JS.ignore_attributes(["open", "style"])}
+        data-open={to_string(@task_dialog_open)}
+        data-editing-id={@editing_task && @editing_task.id}
         aria-label={if @editing_task, do: "Edit todo", else: "New todo"}
       >
         <.form
@@ -712,6 +846,7 @@ defmodule ToWeb.ListLive do
           phx-change="validate"
           phx-submit={if @editing_task, do: "update-task", else: "create"}
         >
+          <%!-- Keep Add/Save beside the title in both task modes. Only the list dialog puts Save beside Cancel. --%>
           <div class="task-entry">
             <input
               id="task-title"
@@ -722,7 +857,6 @@ defmodule ToWeb.ListLive do
               aria-label="Task title"
               required
               maxlength="300"
-              phx-debounce="300"
               autocomplete="off"
               enterkeyhint="done"
             />
@@ -736,7 +870,6 @@ defmodule ToWeb.ListLive do
               aria-describedby="task-description-errors"
               id="task-description"
               name="task[description]"
-              phx-debounce="300"
             >{value(@form, :description)}</textarea></label>
             <.field_errors
               field={@form[:description]}
@@ -771,10 +904,9 @@ defmodule ToWeb.ListLive do
               name="task[nested_under]"
               value={value(@form, :nested_under)}
               maxlength="100"
-              phx-debounce="300"
             /></label>
             <.field_errors field={@form[:nested_under]} id="task-group-errors" label="Group" />
-            <div class="task-actions">
+            <div class="dialog-actions">
               <button type="button" data-cancel-task>Cancel</button>
               <button
                 :if={@editing_task}
@@ -784,9 +916,7 @@ defmodule ToWeb.ListLive do
                 aria-label="Delete"
                 title="Delete todo"
               >
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />
-                </svg>
+                <.trash_icon />
               </button>
             </div>
           </fieldset>
@@ -806,7 +936,13 @@ defmodule ToWeb.ListLive do
               if (!this.editing) this.returnTo = null
               if (this.quick.getBoundingClientRect().top < 0) window.scrollTo(0, 0)
               this.position()
-              if (!this.el.open) this.el.showModal()
+              if (!this.el.open) {
+                this.el.showModal()
+                if (this.el.dataset.open !== "true") {
+                  this.pendingNewTask = true
+                  this.pushEvent("new-task", {})
+                }
+              }
               this.el.scrollTop = 0
               this.title.focus({preventScroll: true})
             }
@@ -821,18 +957,15 @@ defmodule ToWeb.ListLive do
               this.title.dispatchEvent(new Event("input", {bubbles: true}))
             }
             this.cancel = () => {
-              if (this.editing) {
-                this.el.querySelector(":focus")?.blur()
-                this.pushEvent("cancel-edit", {})
-                return
+              this.pendingNewTask = false
+              this.el.querySelector(":focus")?.blur()
+              if (!this.editing) {
+                const task = Object.fromEntries(Array.from(new FormData(this.form))
+                  .filter(([name]) => name.startsWith("task["))
+                  .map(([name, value]) => [name.slice(5, -1), value]))
+                this.pushEvent("validate", {task})
               }
-              const task = Object.fromEntries(Array.from(new FormData(this.form))
-                .filter(([name]) => name.startsWith("task["))
-                .map(([name, value]) => [name.slice(5, -1), value]))
-              this.pushEvent("validate", {task})
-              this.quick.value = this.title.value
-              this.el.close()
-              this.restoreFocus()
+              this.pushEvent("cancel-edit", {})
             }
             this.restoreFocus = () => {
               const target = document.getElementById(this.returnTo) || this.quick
@@ -858,7 +991,11 @@ defmodule ToWeb.ListLive do
               if (event.shiftKey) this.el.querySelector("#task-description").focus()
               else this.form.requestSubmit()
             }
+            this.navigate = event => {
+              if (event.detail.pop && this.el.open) this.el.querySelector(":focus")?.blur()
+            }
             window.addEventListener("resize", this.position)
+            window.addEventListener("phx:navigate", this.navigate)
             this.quick.addEventListener("input", this.input)
             this.quick.addEventListener("click", this.open)
             this.el.addEventListener("cancel", this.cancelEvent)
@@ -866,24 +1003,38 @@ defmodule ToWeb.ListLive do
             this.el.addEventListener("click", this.click)
             this.el.addEventListener("keydown", this.keydown)
             this.handleEvent("open-task", ({id}) => {
+              this.pendingNewTask = false
               this.editing = !!id
               this.returnTo = id ? `edit-task-${id}` : null
               this.open()
             })
             this.handleEvent("task-edit-closed", () => {
+              if (this.pendingNewTask) {
+                this.pushEvent("new-task", {})
+                return
+              }
               this.editing = false
-              this.el.close()
-              this.restoreFocus()
+              if (this.el.open) {
+                this.el.close()
+                this.restoreFocus()
+              }
             })
             this.handleEvent("task-saved", () => {
+              this.pendingNewTask = false
               this.form.reset()
               this.quick.value = ""
               this.el.close()
               this.restoreFocus()
             })
+            if (this.el.dataset.open === "true") {
+              this.editing = !!this.el.dataset.editingId
+              this.returnTo = this.editing ? `edit-task-${this.el.dataset.editingId}` : null
+              this.open()
+            }
           },
           destroyed() {
             window.removeEventListener("resize", this.position)
+            window.removeEventListener("phx:navigate", this.navigate)
             this.quick.removeEventListener("input", this.input)
             this.quick.removeEventListener("click", this.open)
             this.el.removeEventListener("cancel", this.cancelEvent)
@@ -965,6 +1116,7 @@ defmodule ToWeb.ListLive do
     <script :type={Phoenix.LiveView.ColocatedHook} name=".QuickEntry">
       export default {
         mounted() {
+          this.handleEvent("dialog-back", () => window.history.back())
           this.keydown = event => {
             const title = document.getElementById("quick-title")
             if (event.altKey && ["ArrowLeft", "ArrowRight"].includes(event.key) &&

@@ -25,8 +25,11 @@ defmodule ToWeb.Router do
 
     live_session :household, on_mount: [{ToWeb.UserAuth, :require_user}] do
       live "/settings", SettingsLive
-      live "/lists", ListLive
-      live "/lists/:id", ListLive
+      live "/lists", ListLive, :index
+      live "/lists/:id", ListLive, :index
+      live "/lists/:id/edit", ListLive, :edit
+      live "/lists/:id/tasks/new", ListLive, :new_task
+      live "/lists/:id/tasks/:task_id/edit", ListLive, :edit_task
     end
   end
 

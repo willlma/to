@@ -28,6 +28,15 @@ defmodule To.Tasks do
     result
   end
 
+  def change_list(list, attrs \\ %{}), do: List.changeset(list, attrs)
+
+  def rename_list(list, name) do
+    result = list |> List.changeset(%{name: name}) |> Repo.update()
+
+    if match?({:ok, _}, result), do: Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
+    result
+  end
+
   def get_list(id), do: Repo.one(from(l in List, where: l.id == ^id and is_nil(l.deleted_at)))
   def get_list!(id), do: Repo.one!(from(l in List, where: l.id == ^id and is_nil(l.deleted_at)))
 
@@ -77,8 +86,11 @@ defmodule To.Tasks do
     )
   end
 
-  def get_task!(list_id, id) do
-    Repo.one!(
+  def get_task!(list_id, id),
+    do: get_task(list_id, id) || raise(Ecto.NoResultsError, queryable: Task)
+
+  def get_task(list_id, id) do
+    Repo.one(
       from(t in Task,
         where: t.list_id == ^list_id and t.id == ^id and is_nil(t.deleted_at),
         preload: [:created_by, :updated_by]

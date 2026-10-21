@@ -78,6 +78,15 @@ Compile before bundling assets so LiveView can generate both manifests.
 - Your initial in a circle opens a separate settings page with sign-out. The list-name form stays hidden until
   you click the plus beside the lists. Controls share one compact row on phones,
   with the description immediately below the title.
+  A pen beside the active list opens its name for editing. Save renames the list
+  for both people; Cancel or Escape discards the change. The trash icon in that
+  dialog deletes the list after confirmation and is hidden for the last list.
+  List editing uses `/lists/:id/edit`; task dialogs use `/lists/:id/tasks/new`
+  and `/lists/:id/tasks/:task_id/edit`. These are live patches of the same list.
+  Browser Back (including mobile back-swipe) closes a dialog; Forward reopens it.
+  Back keeps a new-task draft but discards unsaved edits to existing tasks or lists.
+  Save and Cancel close without adding a separate history entry. Direct dialog
+  links and reloads work; Cancel from a direct link returns to its list.
 - Tasks have a required title and optional description, date-only `due_on`,
   assignee Nicole or Will, and a plain-string group (`nested_under`).
 - Ungrouped tasks appear before named groups. Within each section, overdue tasks and
