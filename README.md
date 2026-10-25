@@ -1,7 +1,7 @@
 # To
 
 A small shared to-do app for Nicole and Will. Phoenix LiveView, SQLite, Oban,
-Google sign-in, and an installable PWA. No SPA or offline synchronization.
+Google sign-in, and an installable PWA. LiveView UI with form recovery for checkmarks.
 
 ## Development
 
@@ -92,7 +92,8 @@ Compile before bundling assets so LiveView can generate both manifests.
 - Ungrouped tasks appear before named groups. Within each section, overdue tasks and
   dates within the next 30 days precede undated tasks; dates more than 30 days away
   follow undated tasks. Groups stay together, ordered by their first task in this order;
-  each group's tasks use the same deadline ordering. Equal dates use creation time/id.
+  each group's tasks use the same deadline ordering. A horizontal rule separates
+  the non-empty deadline sections within each group. Equal dates use creation time/id.
   Dates outside the current UTC year include the year. Dates on incomplete overdue
   tasks use dark orange, with a lighter shade in dark mode. No position column; undated
   ordering is provisional.
@@ -139,6 +140,12 @@ Compile before bundling assets so LiveView can generate both manifests.
   edits and imports do not send assignment notifications. Delivery runs after the
   task commits. Missing or expired subscriptions and delivery failures show an error
   to the creator while keeping the task saved.
+- Checkboxes update natively; strike-through reflects server-confirmed completion.
+  LiveView automatically recovers the checkbox forms after reconnecting while
+  the page remains open. Recovery saves only
+  changes from the last server-rendered state, preserving untouched checkboxes and
+  other task fields. Closing, reloading, or navigating away discards unsaved changes.
+  Offline task creation and editing are not supported.
 - A dropped connection preserves the live form through LiveView recovery. Closing
   or reloading the page does not promise draft recovery. Concurrent edits use the
   last saved values; there is no conflict-resolution interface in this first pass.

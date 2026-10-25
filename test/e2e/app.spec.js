@@ -1324,3 +1324,94 @@ test('dialog routes follow browser history on desktop and mobile', async ({page,
   }
   await mobileContext.close();
 });
+
+test('offline checkmarks and deadline separators', async ({page, browser}) => {
+  await signIn(page);
+  await page.getByRole('button', {name:'New list',exact:true}).click();
+  await page.locator('#list-name').fill('Offline verification');
+  await page.locator('#list-form').getByRole('button').click();
+  await expect(page.locator('#list-name')).toBeHidden();
+  const today = new Date().toISOString().slice(0,10);
+  const laterDate = new Date(today + 'T12:00:00Z');
+  laterDate.setUTCDate(laterDate.getUTCDate()+31);
+  const laterDue = laterDate.toISOString().slice(0,10);
+  const near = await createTask(page, 'Soon offline', {due:today});
+  const undated = await createTask(page, 'Undated offline');
+  const later = await createTask(page, 'Later offline', {due:laterDue});
+  const removed = await createTask(page, 'Removed while offline');
+  await createTask(page, 'Grouped soon', {due:today,group:'Verification group'});
+  await createTask(page, 'Grouped later', {due:laterDue,group:'Verification group'});
+  const ungrouped = page.getByRole('region', {name:'Ungrouped tasks',exact:true});
+  await expect(ungrouped.getByRole('separator')).toHaveCount(2);
+  await expect(near.locator('xpath=following-sibling::li[1]').getByRole('separator')).toHaveCount(1);
+  await expect(later.locator('xpath=preceding-sibling::li[1]').getByRole('separator')).toHaveCount(1);
+  await expect(page.locator('section[data-drop-group="Verification group"]').getByRole('separator')).toHaveCount(1);
+  await page.screenshot({path:'artifacts/e2e/deadline-separators.png',fullPage:true});
+  // Wrapping the grip in a form must preserve dragging and keyboard group moves.
+  await undated.getByRole('checkbox').dragTo(page.locator('input[data-group="Verification group"]'));
+  await expect(undated).toHaveAttribute('data-group', 'Verification group');
+  await expect(undated.getByRole('checkbox')).not.toBeChecked();
+  await undated.getByRole('checkbox').press('Alt+ArrowUp');
+  await expect(undated).toHaveAttribute('data-group', '');
+  await expect(undated.getByRole('checkbox')).not.toBeChecked();
+
+  const context = await browser.newContext();
+  const nicole = await context.newPage();
+  await signIn(nicole, 'Nicole');
+  await nicole.getByRole('link', {name:'Offline verification',exact:true}).click();
+  const nicoleNear = taskRow(nicole, 'Soon offline');
+
+  await page.context().setOffline(true);
+  // Chromium preserves open WebSockets during offline emulation; close it explicitly.
+  await page.evaluate(() => window.liveSocket.disconnect());
+  await expect(page.locator('#connection-status')).toBeVisible();
+  await near.getByRole('checkbox').check();
+  await undated.getByRole('checkbox').check();
+  await undated.getByRole('checkbox').uncheck();
+  await undated.getByRole('checkbox').check();
+  // Returning to the original state should not overwrite a later remote change.
+  await later.getByRole('checkbox').check();
+  await later.getByRole('checkbox').uncheck();
+  await removed.getByRole('checkbox').check();
+  await expect(near.getByRole('checkbox')).toBeChecked();
+  await expect(undated.getByRole('checkbox')).toBeChecked();
+  await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'none');
+  await expect(nicoleNear.getByRole('checkbox')).not.toBeChecked();
+  await page.screenshot({path:'artifacts/e2e/offline-checkmarks.png',fullPage:true});
+
+  // Another person's edits must survive completion replay; deletions must not be undone.
+  await nicoleNear.getByRole('textbox', {name:'Description',exact:true}).fill('Keep this newer note');
+  await nicoleNear.getByRole('textbox', {name:'Description',exact:true}).press('Tab');
+  await deleteTask(nicole, taskRow(nicole, 'Removed while offline'));
+  await taskRow(nicole, 'Later offline').getByRole('checkbox').check();
+  await page.context().setOffline(false);
+  await page.evaluate(() => window.liveSocket.connect());
+  await expect(page.locator('.phx-connected')).toBeVisible();
+  await expect(nicoleNear.getByRole('checkbox')).toBeChecked();
+  await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'line-through');
+  await expect(taskRow(nicole, 'Undated offline').getByRole('checkbox')).toBeChecked();
+  await expect(later.getByRole('checkbox')).toBeChecked();
+  await expect(near.getByRole('textbox', {name:'Description',exact:true})).toHaveValue('Keep this newer note');
+  await expect(removed).toHaveCount(0);
+  // A second reconnect must not flip an already-recovered completion.
+  await page.evaluate(() => window.liveSocket.disconnect());
+  await expect(page.locator('#connection-status')).toBeVisible();
+  await page.evaluate(() => window.liveSocket.connect());
+  await expect(page.locator('.phx-connected')).toBeVisible();
+  await expect(near.getByRole('checkbox')).toBeChecked();
+  await expect(later.getByRole('checkbox')).toBeChecked();
+
+  await page.context().setOffline(true);
+  await page.evaluate(() => window.liveSocket.disconnect());
+  await near.getByRole('checkbox').uncheck();
+  await expect(near.getByRole('checkbox')).not.toBeChecked();
+  await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'line-through');
+  await page.context().setOffline(false);
+  // The scope is form recovery in this page, not persistence across a reload.
+  await page.reload();
+  await expect(page.locator('.phx-connected')).toBeVisible();
+  await expect(near.getByRole('checkbox')).toBeChecked();
+  await expect(undated.getByRole('checkbox')).toBeChecked();
+  await page.screenshot({path:'artifacts/e2e/recovered-checkmarks.png',fullPage:true});
+  await context.close();
+});

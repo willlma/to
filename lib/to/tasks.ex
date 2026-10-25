@@ -139,11 +139,23 @@ defmodule To.Tasks do
     end
   end
 
-  def toggle_task(actor, %Task{} = task) do
-    task
-    |> Changeset.change(completed_at: if(task.completed_at, do: nil, else: now()))
-    |> Changeset.put_change(:updated_by_id, actor_id!(actor))
-    |> write(:update)
+  def set_completed(actor, id, completed) when is_boolean(completed) do
+    actor_id = actor_id!(actor)
+
+    case Repo.one(from(t in Task, where: t.id == ^id and is_nil(t.deleted_at))) do
+      nil ->
+        {:error, :not_found}
+
+      task ->
+        if task.completed_at != nil == completed do
+          {:ok, task}
+        else
+          task
+          |> Changeset.change(completed_at: if(completed, do: now()))
+          |> Changeset.put_change(:updated_by_id, actor_id)
+          |> write(:update)
+        end
+    end
   end
 
   def delete_task(actor, %Task{} = task) do

@@ -245,9 +245,30 @@ defmodule ToWeb.ListLive do
     end
   end
 
-  def handle_event("toggle", %{"id" => id}, socket) do
-    task = Tasks.get_task!(socket.assigns.list.id, id)
-    {:noreply, result(socket, Tasks.toggle_task(socket.assigns.current_user, task))}
+  def handle_event("set-completed", %{"task_id" => id, "completed" => completed}, socket)
+      when completed in ["true", "false"] do
+    case Tasks.set_completed(socket.assigns.current_user, id, completed == "true") do
+      {:ok, _} ->
+        {:noreply, load_tasks(socket)}
+
+      {:error, :not_found} ->
+        {:noreply, load_tasks(socket)}
+
+      {:error, _} ->
+        {:noreply, assign(socket, notice: "Could not save the checkmark. Please try again.")}
+    end
+  end
+
+  # Recover only a changed checkbox, so stale untouched forms cannot overwrite
+  # another person's completion changes while this browser was disconnected.
+  def handle_event(
+        "recover-completion",
+        %{"completed" => value, "baseline" => baseline} = params,
+        socket
+      ) do
+    if value != baseline,
+      do: handle_event("set-completed", params, socket),
+      else: {:noreply, socket}
   end
 
   def handle_event("move-task", %{"id" => id, "group" => group}, socket) do
@@ -439,6 +460,14 @@ defmodule ToWeb.ListLive do
   defp date(nil), do: nil
   defp date(value), do: Date.to_iso8601(value)
 
+  defp deadline_section(%{due_on: nil}), do: :undated
+
+  defp deadline_section(%{due_on: due_on}) do
+    if Date.compare(due_on, Date.add(Date.utc_today(), 30)) == :gt,
+      do: :later,
+      else: :soon
+  end
+
   defp date_label(value) do
     format = if value.year == Date.utc_today().year, do: "%b %-d", else: "%b %-d, %Y"
     Calendar.strftime(value, format)
@@ -531,7 +560,7 @@ defmodule ToWeb.ListLive do
     ~H"""
     <style :type={ToWeb.ColocatedCSS}>
       [data-task-id] { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr) auto auto auto; align-items: center; column-gap: .25rem; padding: .1rem 0; }
-      [data-task-id] > input[type="checkbox"] { width: 1.1rem; height: 1.1rem; margin: 0; padding: 0; cursor: grab; touch-action: none; }
+      [data-task-id] input[data-completion] { grid-area: 1 / 1; width: 1.1rem; height: 1.1rem; margin: 0; padding: 0; cursor: grab; touch-action: none; }
       [data-task-id] > form { display: contents; }
       [data-task-id] form > input, [data-task-id] textarea { width: 100%; min-width: 0; box-sizing: border-box; border: 0; padding: 0; }
       .task-title { grid-area: 1 / 2; line-height: 1.2; }
@@ -564,16 +593,27 @@ defmodule ToWeb.ListLive do
       data-group={@task.nested_under || ""}
       class={[@task.completed_at && "completed", overdue?(@task) && "overdue"]}
     >
-      <input
-        type="checkbox"
-        checked={@task.completed_at != nil}
-        phx-click="toggle"
-        phx-value-id={@task.id}
-        title="Click to complete; drag to a group or list. Alt + Up/Down changes group; Alt + Left/Right changes list."
-        aria-label={
-          if @task.completed_at, do: "Reopen #{@task.title}", else: "Complete #{@task.title}"
-        }
-      />
+      <.form
+        for={%{}}
+        id={"completion-#{@task.id}"}
+        phx-change="set-completed"
+        phx-auto-recover="recover-completion"
+      >
+        <input type="hidden" name="task_id" value={@task.id} />
+        <input type="hidden" name="baseline" value={to_string(@task.completed_at != nil)} />
+        <input type="hidden" name="completed" value="false" />
+        <input
+          type="checkbox"
+          name="completed"
+          value="true"
+          data-completion
+          checked={@task.completed_at != nil}
+          title="Click to complete; drag to a group or list. Alt + Up/Down changes group; Alt + Left/Right changes list."
+          aria-label={
+            if @task.completed_at, do: "Reopen #{@task.title}", else: "Complete #{@task.title}"
+          }
+        />
+      </.form>
       <.form
         for={%{}}
         id={"inline-task-#{@task.id}"}
@@ -755,7 +795,7 @@ defmodule ToWeb.ListLive do
         </.link>
       </header>
       <p id="connection-status" role="status" hidden>
-        Reconnecting… Your changes will need a connection.
+        Reconnecting… Keep this page open to recover checkmarks when connected.
       </p>
       <p :if={@notice && !@list_form} role="status">{@notice}</p>
       <dialog
@@ -1076,12 +1116,15 @@ defmodule ToWeb.ListLive do
           >+</button>
         </.form>
         <ul class={if is_binary(group), do: "grouped"}>
-          <.task_row
-            :for={task <- items}
-            task={task}
-            users={@users}
-            errors={@inline_errors[task.id] || []}
-          />
+          <%= for {section, index} <- Enum.with_index(Enum.chunk_by(items, &deadline_section/1)) do %>
+            <li :if={index > 0}><hr /></li>
+            <.task_row
+              :for={task <- section}
+              task={task}
+              users={@users}
+              errors={@inline_errors[task.id] || []}
+            />
+          <% end %>
         </ul>
       </section>
       <details
@@ -1120,7 +1163,7 @@ defmodule ToWeb.ListLive do
           this.keydown = event => {
             const title = document.getElementById("quick-title")
             if (event.altKey && ["ArrowLeft", "ArrowRight"].includes(event.key) &&
-              event.target.matches('li > input[type="checkbox"]')) {
+              event.target.matches('input[data-completion]')) {
               event.preventDefault()
               const lists = [...this.el.querySelectorAll("[data-drop-list]")]
               const current = lists.findIndex(el => el.getAttribute("aria-current") === "page")
@@ -1129,7 +1172,7 @@ defmodule ToWeb.ListLive do
                 id: event.target.closest("li").dataset.taskId, list_id: target.dataset.dropList
               })
             } else if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key) &&
-              event.target.matches('li > input[type="checkbox"]')) {
+              event.target.matches('input[data-completion]')) {
               event.preventDefault()
               const row = event.target.closest("li")
               const groups = [...new Set([...this.el.querySelectorAll("[data-drop-group]")].map(el => el.dataset.dropGroup))]
@@ -1153,7 +1196,7 @@ defmodule ToWeb.ListLive do
           }
           this.pointerdown = event => {
             this.skipClick = false
-            if (!event.isPrimary || event.button !== 0 || !event.target.matches('li > input[type="checkbox"]')) return
+            if (!event.isPrimary || event.button !== 0 || !event.target.matches('input[data-completion]')) return
             this.drag = {row: event.target.closest("li"), grip: event.target,
               pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false}
             event.target.setPointerCapture(event.pointerId)
