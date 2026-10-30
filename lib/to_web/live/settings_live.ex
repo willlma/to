@@ -213,6 +213,7 @@ defmodule ToWeb.SettingsLive do
         <p>Google sync is disabled for local development.</p>
       <% end %>
       <.form for={%{}} action="/logout" method="delete"><button>Sign out</button></.form>
+      <p><.link href={~p"/pp"}>Privacy policy</.link></p>
       <p :if={@notice} role="status">{@notice}</p>
     </main>
     """

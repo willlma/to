@@ -19,6 +19,7 @@ defmodule ToWeb.Router do
   scope "/", ToWeb do
     pipe_through :browser
     get "/", PageController, :home
+    get "/pp", PageController, :privacy
     get "/auth/google", AuthController, :request
     get "/auth/google/callback", AuthController, :callback
     delete "/logout", AuthController, :logout

@@ -1,6 +1,8 @@
 defmodule ToWeb.PageController do
   use ToWeb, :controller
 
+  def privacy(conn, _params), do: render(conn, :privacy)
+
   def home(conn, _params) do
     if conn.assigns.current_user do
       redirect(conn, to: ~p"/lists")
