@@ -4,7 +4,11 @@ defmodule ToWeb.UserAuth do
   alias To.Accounts
 
   def fetch_current_user(conn, _opts) do
-    assign(conn, :current_user, Accounts.get_user(get_session(conn, :user_id)))
+    user = Accounts.get_user(get_session(conn, :user_id))
+    conn = assign(conn, :current_user, user)
+
+    # Keep returning users signed in and upgrade existing session-only cookies.
+    if user, do: configure_session(conn, renew: true), else: conn
   end
 
   def require_user(conn, _opts) do

@@ -8,6 +8,7 @@ defmodule ToWeb.Endpoint do
     store: :cookie,
     key: "_to_key",
     signing_salt: "X/4LJpva",
+    max_age: 400 * 24 * 60 * 60,
     same_site: "Lax"
   ]
 

@@ -172,6 +172,21 @@ Allowlist both Google accounts as test users if the consent screen is in testing
 Google testing-mode refresh tokens may expire after seven days with Tasks scopes.
 Each person signs in separately and grants Tasks access.
 
+App sign-in uses a persistent cookie lasting 400 days, renewed on authenticated
+page loads. It survives browser restarts and deployments, provided the hostname
+and `SECRET_KEY_BASE` stay the same. Existing signed-in browsers receive the
+persistent cookie on their next page load. Signing out clears it.
+
+Google Tasks access is separate from app sign-in. To remove the testing-mode
+seven-day expiry, change the Google Auth Platform audience's publishing status
+to **In production**, then reconnect each Google account to obtain fresh tokens.
+Google permits personal-use apps with a few known users to remain unverified;
+the consent screen may still show an unverified-app warning. See
+[Google's audience settings](https://support.google.com/cloud/answer/15549945) and
+[personal-use verification exception](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification#exceptions).
+Clearing browser data, a changed signing secret, or revoked Google access can
+still require signing in or reconnecting.
+
 | Variable | Purpose |
 | --- | --- |
 | `GOOGLE_CLIENT_ID` | OAuth application ID |
