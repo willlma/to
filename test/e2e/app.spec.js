@@ -851,6 +851,8 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
       for (const point of outside) {
         const title = `Outside click: ${viewport.width}, ${point.name}`;
         await quick.fill(title);
+        await expect(dialog).toBeVisible();
+        await expect(page.locator('#task-title')).toBeFocused();
         await page.locator('#task-description').fill('Preserve outside-click notes');
         await page.locator('#task-due').fill('2031-01-02');
         await page.locator('#task-description').click();
@@ -1221,6 +1223,23 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     expect((await googleState(request)).pushes.at(-1)).toMatchObject({endpoint:nicoleSubscription.endpoint,payload:{title:'Will assigned you a task'}});
     await expect(page.locator('#notification-error')).toHaveCount(0);
 
+    await test.step('Notify the assigner when the other person completes a task', async () => {
+      const beforeCompletion = (await googleState(request)).pushes.length;
+      await taskRow(page,'Nicole assigned Will an undated task').getByRole('checkbox').check();
+      await expect.poll(async () => (await googleState(request)).pushes.length).toBe(beforeCompletion + 1);
+      expect((await googleState(request)).pushes.at(-1)).toMatchObject({endpoint:nicoleSubscription.endpoint,payload:{title:'Will completed your task',body:'Nicole assigned Will an undated task',url:new URL(listUrl).pathname}});
+      await taskRow(nicole,'Will assigned Nicole a task').getByRole('checkbox').check();
+      await expect.poll(async () => (await googleState(request)).pushes.length).toBe(beforeCompletion + 2);
+      expect((await googleState(request)).pushes.at(-1)).toMatchObject({endpoint:deviceSubscription.endpoint,payload:{title:'Nicole completed your task',body:'Will assigned Nicole a task'}});
+      await taskRow(page,'Self-assigned task').getByRole('checkbox').check();
+      await taskRow(page,'Unassigned task').getByRole('checkbox').check();
+      await taskRow(page,'Assignment without notifications').getByRole('checkbox').check();
+      await taskRow(page,'Nicole assigned Will an undated task').getByRole('checkbox').uncheck();
+      await expect(taskRow(nicole,'Nicole assigned Will an undated task').getByRole('checkbox')).not.toBeChecked();
+      expect((await googleState(request)).pushes).toHaveLength(beforeCompletion + 2);
+      await test.info().attach('completion-notifications',{body:JSON.stringify((await googleState(request)).pushes.slice(beforeCompletion),null,2),contentType:'application/json'});
+    });
+
     await request.post('http://127.0.0.1:4010/__push-response',{data:{status:503}});
     await createTask(page,'Saved despite failed notification',{assignee:'Nicole'});
     await expect(page.getByRole('alert')).toHaveText("Task saved, but couldn't notify Nicole.");
@@ -1229,6 +1248,9 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await createTask(page,'Expired notification subscription',{assignee:'Nicole'});
     await expect(page.getByRole('alert')).toHaveText("Task saved, but Nicole doesn't have notifications set up.");
     await expect(taskRow(nicole,'Expired notification subscription')).toBeVisible();
+    await taskRow(page,'Nicole assigned Will an undated task').getByRole('checkbox').check();
+    await expect(page.getByRole('alert')).toHaveText("Task saved, but Nicole doesn't have notifications set up.");
+    await expect(taskRow(nicole,'Nicole assigned Will an undated task').getByRole('checkbox')).toBeChecked();
     await page.screenshot({path:'artifacts/e2e/assignment-notifications-expired.png',fullPage:true});
     await test.info().attach('assignment-notifications',{body:JSON.stringify((await googleState(request)).pushes.slice(before),null,2),contentType:'application/json'});
     await page.getByRole('link',{name:'Settings for Will'}).click();
@@ -1414,4 +1436,93 @@ test('offline checkmarks and deadline separators', async ({page, browser}) => {
   await expect(undated.getByRole('checkbox')).toBeChecked();
   await page.screenshot({path:'artifacts/e2e/recovered-checkmarks.png',fullPage:true});
   await context.close();
+});
+
+
+test('mobile edit target and touch dragging', async ({page}) => {
+  await page.setViewportSize({width:390,height:844});
+  await signIn(page);
+  const row = await createTask(page,'Mobile hit targets',{due:'2030-10-03'});
+  await createTask(page,'Mobile drag destination',{group:'Mobile group'});
+  const edit = row.getByRole('button',{name:'Edit Mobile hit targets',exact:true});
+  const box = await edit.boundingBox();
+  for (const fraction of [0.15,0.5,0.85]) {
+    expect(await page.evaluate(({x,y}) => document.elementFromPoint(x,y)?.closest('button')?.id,
+      {x:box.x+box.width*fraction,y:box.y+box.height/2})).toBe(await edit.getAttribute('id'));
+  }
+  await edit.click();
+  await expect(page.locator('#task-description')).toBeVisible();
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  // Exercise the iOS touch path independently of Chromium's pointer emulation.
+  await row.getByRole('checkbox').evaluate((grip) => {
+    const target = document.querySelector('input[data-group="Mobile group"]');
+    const start = grip.getBoundingClientRect(), end = target.getBoundingClientRect();
+    const fire = (type,x,y) => {
+      const event = new Event(type,{bubbles:true,cancelable:true});
+      Object.defineProperty(event,'touches',{value:type === 'touchend' ? [] : [{clientX:x,clientY:y}]});
+      grip.dispatchEvent(event);
+    };
+    fire('touchstart',start.x+start.width/2,start.y+start.height/2);
+    fire('touchmove',end.x+end.width/2,end.y+end.height/2);
+    fire('touchend',end.x,end.y);
+  });
+  await expect(row).toHaveAttribute('data-group','Mobile group');
+  await expect(row.getByRole('checkbox')).not.toBeChecked();
+  await row.getByRole('checkbox').evaluate(grip => {
+    for (const type of ['touchstart','touchend']) {
+      const event = new Event(type,{bubbles:true,cancelable:true});
+      Object.defineProperty(event,'touches',{value:type === 'touchstart' ? [{clientX:0,clientY:0}] : []});
+      grip.dispatchEvent(event);
+    }
+  });
+  await expect(row.getByRole('checkbox')).toBeChecked();
+  await page.screenshot({path:'artifacts/e2e/mobile-edit-and-drag.png',fullPage:true});
+});
+
+test('completion pushes reach the assigner and failures preserve completion', async ({page,browser,request}) => {
+  const {createECDH,randomBytes} = require('node:crypto');
+  const otherContext = await browser.newContext();
+  const nicole = await otherContext.newPage();
+  await signIn(page);
+  await signIn(nicole,'Nicole');
+  const subscriptions = [];
+  for (const [tab,name] of [[page,'will'],[nicole,'nicole']]) {
+    const key = createECDH('prime256v1'); key.generateKeys();
+    const subscription = {endpoint:name === 'will' ? 'https://fcm.googleapis.com/e2e' : 'https://fcm.googleapis.com/completion-nicole',time_zone:'America/Los_Angeles',
+      keys:{p256dh:key.getPublicKey().toString('base64url'),auth:randomBytes(16).toString('base64url')}};
+    const status = await tab.evaluate(async subscription => (await fetch('/api/push/subscriptions',{
+      method:'POST',headers:{'content-type':'application/json','x-csrf-token':document.querySelector('meta[name="csrf-token"]').content},
+      body:JSON.stringify(subscription)
+    })).status,subscription);
+    expect(status).toBe(200);
+    subscriptions.push(subscription);
+  }
+  for (const [creator,completer,assignee,name,subscription] of [
+    [page,nicole,'Nicole','Nicole',subscriptions[0]],
+    [nicole,page,'Will','Will',subscriptions[1]]
+  ]) {
+    const title = `Completion check ${name}`;
+    await createTask(creator,title,{assignee});
+    await taskRow(completer,title).getByRole('checkbox').check();
+    await expect.poll(async () => (await googleState(request)).pushes.filter(p => p.payload.body === title && p.payload.title === `${name} completed your task`).length).toBe(1);
+    const delivery = (await googleState(request)).pushes.find(p => p.payload.body === title && p.payload.title === `${name} completed your task`);
+    expect(delivery.endpoint).toBe(subscription.endpoint);
+    await taskRow(completer,title).getByRole('checkbox').uncheck();
+    await expect(taskRow(creator,title).getByRole('checkbox')).not.toBeChecked();
+    expect((await googleState(request)).pushes.filter(p => p.payload.body === title && p.payload.title === `${name} completed your task`)).toHaveLength(1);
+  }
+  const before = (await googleState(request)).pushes.length;
+  for (const [title,options] of [['Completion self',{assignee:'Will'}],['Completion unassigned',{}],['Completion by creator',{assignee:'Nicole'}]]) {
+    const row = await createTask(page,title,options);
+    await row.getByRole('checkbox').check();
+    await expect(taskRow(nicole,title).getByRole('checkbox')).toBeChecked();
+  }
+  expect((await googleState(request)).pushes.filter(p => p.payload.title.includes('completed your task') && p.payload.body.startsWith('Completion '))).toHaveLength(2);
+  await createTask(page,'Completion delivery failure',{assignee:'Nicole'});
+  await request.post('http://127.0.0.1:4010/__push-response',{data:{status:503}});
+  await taskRow(nicole,'Completion delivery failure').getByRole('checkbox').check();
+  await expect(nicole.getByRole('alert')).toHaveText("Task saved, but couldn't notify Will.");
+  await expect(taskRow(page,'Completion delivery failure').getByRole('checkbox')).toBeChecked();
+  await test.info().attach('completion-push-deliveries',{body:JSON.stringify((await googleState(request)).pushes.slice(before),null,2),contentType:'application/json'});
+  await otherContext.close();
 });

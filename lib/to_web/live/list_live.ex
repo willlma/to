@@ -248,8 +248,23 @@ defmodule ToWeb.ListLive do
   def handle_event("set-completed", %{"task_id" => id, "completed" => completed}, socket)
       when completed in ["true", "false"] do
     case Tasks.set_completed(socket.assigns.current_user, id, completed == "true") do
-      {:ok, _} ->
-        {:noreply, load_tasks(socket)}
+      {:ok, task, notification} ->
+        error =
+          case notification do
+            :ok ->
+              nil
+
+            {:error, :not_subscribed} ->
+              "Task saved, but #{task.created_by.name} doesn't have notifications set up."
+
+            {:error, :not_configured} ->
+              "Task saved, but notifications aren't configured on the server."
+
+            {:error, _} ->
+              "Task saved, but couldn't notify #{task.created_by.name}."
+          end
+
+        {:noreply, socket |> assign(notification_error: error) |> load_tasks()}
 
       {:error, :not_found} ->
         {:noreply, load_tasks(socket)}
@@ -571,9 +586,9 @@ defmodule ToWeb.ListLive do
       .task-assignee select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
       .task-assignee:has(select:focus-visible) .person-circle { border-color: light-dark(#706b60, #c4beae); }
       .task-assignee span { pointer-events: none; }
-      .task-date { grid-area: 1 / 4; position: relative; display: flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; margin: 0; font-size: .72rem; }
+      .task-date { grid-area: 1 / 4; position: relative; display: flex; align-items: center; justify-content: center; min-width: 1.5rem; height: 1.5rem; margin: 0; font-size: .72rem; overflow: hidden; isolation: isolate; }
       .overdue .task-date { color: light-dark(#9a3412, #fb923c); }
-      .task-date input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+      .task-date input { position: absolute; inset: 0; width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
       .task-date input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; cursor: pointer; }
       .task-date:has(input:focus-visible) { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
       .task-date span { white-space: nowrap; padding: 0 .15rem; pointer-events: none; }
@@ -1189,17 +1204,18 @@ defmodule ToWeb.ListLive do
             if (!this.drag) return
             this.drag.row.classList.remove("dragging")
             this.drag.target?.classList.remove("drop-target")
-            if (this.drag.grip.hasPointerCapture(this.drag.pointerId)) {
+            if (this.drag.pointerId !== -1 && this.drag.grip.hasPointerCapture(this.drag.pointerId)) {
               this.drag.grip.releasePointerCapture(this.drag.pointerId)
             }
             this.drag = null
           }
           this.pointerdown = event => {
+            if (event.pointerType === "touch") return
             this.skipClick = false
             if (!event.isPrimary || event.button !== 0 || !event.target.matches('input[data-completion]')) return
             this.drag = {row: event.target.closest("li"), grip: event.target,
               pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false}
-            event.target.setPointerCapture(event.pointerId)
+            if (event.pointerId !== -1) event.target.setPointerCapture(event.pointerId)
           }
           this.pointermove = event => {
             const drag = this.drag
@@ -1235,6 +1251,32 @@ defmodule ToWeb.ListLive do
               this.skipClick = false
             }
           }
+          // iOS native checkbox tracking can cancel pointer drags. Own the touch
+          // gesture and explicitly click only when it ends without a drag.
+          this.touchstart = event => {
+            if (event.touches.length !== 1 || !event.target.matches('input[data-completion]')) return
+            event.preventDefault()
+            const touch = event.touches[0]
+            this.pointerdown({target: event.target, isPrimary: true, button: 0,
+              pointerId: -1, clientX: touch.clientX, clientY: touch.clientY})
+          }
+          this.touchmove = event => {
+            if (this.drag?.pointerId !== -1) return
+            event.preventDefault()
+            const touch = event.touches[0]
+            if (touch) this.pointermove({pointerId: -1, clientX: touch.clientX,
+              clientY: touch.clientY, preventDefault() {}})
+          }
+          this.touchend = event => {
+            if (this.drag?.pointerId !== -1) return
+            const {grip, active} = this.drag
+            this.pointerup({pointerId: -1, type: event.type === "touchend" ? "pointerup" : "pointercancel"})
+            if (!active && event.type === "touchend") grip.click()
+          }
+          this.el.addEventListener("touchstart", this.touchstart, {passive: false})
+          this.el.addEventListener("touchmove", this.touchmove, {passive: false})
+          this.el.addEventListener("touchend", this.touchend)
+          this.el.addEventListener("touchcancel", this.touchend)
           this.el.addEventListener("pointerdown", this.pointerdown)
           this.el.addEventListener("pointermove", this.pointermove)
           this.el.addEventListener("pointerup", this.pointerup)
@@ -1250,6 +1292,10 @@ defmodule ToWeb.ListLive do
         destroyed() {
           this.clearDrag()
           window.removeEventListener("keydown", this.keydown)
+          this.el.removeEventListener("touchstart", this.touchstart)
+          this.el.removeEventListener("touchmove", this.touchmove)
+          this.el.removeEventListener("touchend", this.touchend)
+          this.el.removeEventListener("touchcancel", this.touchend)
           this.el.removeEventListener("pointerdown", this.pointerdown)
           this.el.removeEventListener("pointermove", this.pointermove)
           this.el.removeEventListener("pointerup", this.pointerup)

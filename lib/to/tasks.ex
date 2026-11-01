@@ -148,12 +148,20 @@ defmodule To.Tasks do
 
       task ->
         if task.completed_at != nil == completed do
-          {:ok, task}
+          {:ok, task, :ok}
         else
           task
           |> Changeset.change(completed_at: if(completed, do: now()))
           |> Changeset.put_change(:updated_by_id, actor_id)
           |> write(:update)
+          |> case do
+            {:ok, saved} ->
+              notification = if completed, do: To.Reminders.notify_completion(saved), else: :ok
+              {:ok, saved, notification}
+
+            error ->
+              error
+          end
         end
     end
   end

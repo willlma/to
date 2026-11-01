@@ -16,7 +16,26 @@ defmodule To.Reminders do
 
   # Called after the task transaction commits; delivery cannot undo the save.
   def notify_assignment(task) do
-    subscriptions = Repo.all(from s in PushSubscription, where: s.user_id == ^task.assignee_id)
+    notify(task, task.assignee_id, "#{task.created_by.name} assigned you a task", "assignment")
+  end
+
+  def notify_completion(%Task{assignee_id: nil}), do: :ok
+
+  def notify_completion(task) do
+    if task.assignee_id == task.updated_by_id && task.created_by_id != task.updated_by_id do
+      notify(
+        task,
+        task.created_by_id,
+        "#{task.updated_by.name} completed your task",
+        "completion"
+      )
+    else
+      :ok
+    end
+  end
+
+  defp notify(task, user_id, title, kind) do
+    subscriptions = Repo.all(from s in PushSubscription, where: s.user_id == ^user_id)
 
     cond do
       subscriptions == [] ->
@@ -28,9 +47,9 @@ defmodule To.Reminders do
       true ->
         payload =
           Jason.encode!(%{
-            title: "#{task.created_by.name} assigned you a task",
+            title: title,
             body: task.title,
-            tag: "assignment-#{task.id}",
+            tag: "#{kind}-#{task.id}",
             url: "/lists/#{task.list_id}"
           })
 
@@ -38,7 +57,7 @@ defmodule To.Reminders do
           Enum.map(subscriptions, fn subscription ->
             ReminderWorker.send_notification(subscription, payload,
               ttl: 3600,
-              topic: "assignment-#{task.id}"
+              topic: "#{kind}-#{task.id}"
             )
           end)
 

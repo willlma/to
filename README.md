@@ -140,6 +140,8 @@ Compile before bundling assets so LiveView can generate both manifests.
   edits and imports do not send assignment notifications. Delivery runs after the
   task commits. Missing or expired subscriptions and delivery failures show an error
   to the creator while keeping the task saved.
+- Completing a task created by the other person and assigned to you sends a push
+  to its creator. Reopening, self-completion, and unassigned tasks do not notify.
 - Checkboxes update natively; strike-through reflects server-confirmed completion.
   LiveView automatically recovers the checkbox forms after reconnecting while
   the page remains open. Recovery saves only
