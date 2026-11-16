@@ -43,6 +43,16 @@ Compile before bundling assets so LiveView can generate both manifests.
 ## Behavior
 
 - Shared named lists; the first is **To do**.
+- Each browser/PWA remembers its last open list in `localStorage`, separately for
+  each signed-in person. Launching the app or returning from settings restores
+  that list; explicit links and browser history take precedence. Deleted saved
+  lists fall back to the first remaining list. Blocked browser storage leaves
+  explicit links usable but cannot remember a selection across launches.
+- Drag a list tab before or after another tab to change the shared order.
+  The order is saved in the database and updates all connected browsers. New
+  lists append at the end; rearranging tabs does not change the Google import
+  destination, which remains the oldest remaining list. There are no keyboard
+  shortcuts for reordering.
 - Delete list asks for confirmation and removes all its active and completed
   tasks for both people, cancels reminders, and queues deletion of their Google
   copies. The last remaining list cannot be deleted.
@@ -72,6 +82,11 @@ Compile before bundling assets so LiveView can generate both manifests.
   show the same circle empty.
   Drag from a task's checkbox to a group to change its group, or outside the group
   into the shared ungrouped tasks section or onto the current list link to ungroup it.
+  Drop above or below another task in the same group with the same due date
+  (including two undated tasks) to reorder them. The insertion line shows the
+  target position. Manual order is shared and saved in the database; dragging
+  across different due dates cannot override date ordering. New tasks and tasks
+  moved to a different date/group/list append within their new date range.
   Drop on another list link to move it to that list and clear its group, preserving
   the task's other details. With the checkbox focused, Alt+Up/Down moves between
   groups; Alt+Left/Right moves between lists. Tasks still sort by due date.
@@ -91,12 +106,14 @@ Compile before bundling assets so LiveView can generate both manifests.
   assignee Nicole or Will, and a plain-string group (`nested_under`).
 - Ungrouped tasks appear before named groups. Within each section, overdue tasks and
   dates within the next 30 days precede undated tasks; dates more than 30 days away
-  follow undated tasks. Groups stay together, ordered by their first task in this order;
+  follow undated tasks. Groups stay together, ordered by their earliest deadline,
+  with creation time/id breaking ties;
   each group's tasks use the same deadline ordering. A horizontal rule separates
-  the non-empty deadline sections within each group. Equal dates use creation time/id.
+  the non-empty deadline sections within each group. Equal dates use manual
+  position, then creation time/id. Reordering tasks does not reorder their groups.
   Dates outside the current UTC year include the year. Dates on incomplete overdue
-  tasks use dark orange, with a lighter shade in dark mode. No position column; undated
-  ordering is provisional.
+  tasks use dark orange, with a lighter shade in dark mode. Undated tasks use the
+  same saved integer position as dated tasks.
 - Group names save after a pause or on blur. A collision opens a merge-or-rename
   dialog. Clearing a name ungroups its tasks.
 - Tasks completed today remain in place until midnight in America/Los_Angeles,
@@ -219,10 +236,11 @@ are separate from production Fly secrets.
 pnpm test:e2e
 ```
 
-One continuous household journey signs in once per person, creates and edits
-shared tasks, checks Google exports and reminders as those tasks change, exercises
-desktop and touch interaction, and finishes with deletion and recovery checks.
-Named steps organize the report without separate tests or repeated sign-in.
+One test covers the household workflow, editing and offline recovery on desktop
+and mobile, shared ordering and per-client preferences, and browser restart and
+sign-out. Named steps identify each scenario, and related checks reuse sessions,
+tasks, and helpers. Playwright keeps traces from closed browser contexts,
+including each browser restart, in the same report.
 
 The runner starts a real Phoenix server with a separate disposable SQLite database
 and local OAuth/Google Tasks/push boundary simulations. It exercises LiveView,

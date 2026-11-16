@@ -19,7 +19,7 @@ defmodule To.Sync do
   def enqueue(task), do: SyncWorker.new(%{task_id: task.id})
 
   def import_tasks(user) do
-    list_id = hd(To.Tasks.list_lists()).id
+    list_id = To.Tasks.default_list().id
 
     with {:ok, token} <- Google.refresh_access_token(user),
          {:ok, items} <-
@@ -103,6 +103,7 @@ defmodule To.Sync do
         %Task{list_id: list_id, created_by_id: user.id, updated_by_id: user.id}
         |> Task.changeset(attrs)
         |> Ecto.Changeset.change(
+          position: To.Tasks.next_task_position(list_id),
           google_import_user_id: user.id,
           google_import_id: id
         )

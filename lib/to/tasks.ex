@@ -7,7 +7,7 @@ defmodule To.Tasks do
   def list_lists do
     lists =
       Repo.all(
-        from(l in List, where: is_nil(l.deleted_at), order_by: [asc: l.inserted_at, asc: l.id])
+        from(l in List, where: is_nil(l.deleted_at), order_by: [asc: l.position, asc: l.id])
       )
 
     if lists == [] do
@@ -22,11 +22,49 @@ defmodule To.Tasks do
   end
 
   def create_list(attrs) do
-    result = %List{} |> List.changeset(attrs) |> Repo.insert()
+    result =
+      Repo.transaction(fn ->
+        position =
+          (Repo.aggregate(from(l in List, where: is_nil(l.deleted_at)), :max, :position) || -1) +
+            1
+
+        case %List{position: position} |> List.changeset(attrs) |> Repo.insert() do
+          {:ok, list} -> list
+          {:error, changeset} -> Repo.rollback(changeset)
+        end
+      end)
 
     if match?({:ok, _}, result), do: Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
     result
   end
+
+  # The Google import destination stays the oldest list, independently of tab order.
+  def default_list do
+    Repo.one(
+      from(l in List,
+        where: is_nil(l.deleted_at),
+        order_by: [asc: l.inserted_at, asc: l.id],
+        limit: 1
+      )
+    ) ||
+      hd(list_lists())
+  end
+
+  def reorder_lists(actor, ids) when is_list(ids) do
+    result =
+      Repo.transaction(fn ->
+        actor_id!(actor)
+        expected = Enum.map(list_lists(), &to_string(&1.id))
+
+        if Enum.sort(ids) != Enum.sort(expected), do: Repo.rollback(:stale_order)
+        save_positions(List, ids)
+      end)
+
+    if match?({:ok, _}, result), do: Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
+    result
+  end
+
+  def reorder_lists(_actor, _ids), do: {:error, :invalid_order}
 
   def change_list(list, attrs \\ %{}), do: List.changeset(list, attrs)
 
@@ -78,12 +116,58 @@ defmodule To.Tasks do
               type(^future_cutoff, :date)
             ),
           asc: t.due_on,
+          asc: t.position,
           asc: t.created_at,
           asc: t.id
         ],
         preload: [:assignee, :created_by, :updated_by]
       )
     )
+  end
+
+  def next_task_position(list_id) do
+    (Repo.aggregate(
+       from(t in Task, where: t.list_id == ^list_id and is_nil(t.deleted_at)),
+       :max,
+       :position
+     ) || -1) + 1
+  end
+
+  def reorder_task(actor, list_id, id, target_id, after?) when is_boolean(after?) do
+    result =
+      Repo.transaction(fn ->
+        actor_id!(actor)
+        tasks = list_tasks(list_id)
+        task = Enum.find(tasks, &(to_string(&1.id) == id))
+        target = Enum.find(tasks, &(to_string(&1.id) == target_id))
+
+        if is_nil(task) || is_nil(target) || task.id == target.id ||
+             task.nested_under != target.nested_under || task.due_on != target.due_on,
+           do: Repo.rollback(:invalid_order)
+
+        ids =
+          tasks
+          |> Enum.filter(
+            &(&1.nested_under == task.nested_under && &1.due_on == task.due_on && &1.id != task.id)
+          )
+          |> Enum.map(& &1.id)
+
+        index = Enum.find_index(ids, &(&1 == target.id)) + if(after?, do: 1, else: 0)
+        save_positions(Task, Elixir.List.insert_at(ids, index, task.id))
+      end)
+
+    if match?({:ok, _}, result), do: broadcast(list_id)
+    result
+  end
+
+  def reorder_task(_actor, _list_id, _id, _target_id, _after?), do: {:error, :invalid_order}
+
+  defp save_positions(schema, ids) do
+    ids
+    |> Enum.with_index()
+    |> Enum.each(fn {id, position} ->
+      Repo.update_all(from(row in schema, where: row.id == ^id), set: [position: position])
+    end)
   end
 
   def get_task!(list_id, id),
@@ -248,6 +332,18 @@ defmodule To.Tasks do
 
     result =
       Repo.transaction(fn ->
+        changeset =
+          if operation == :insert ||
+               Enum.any?([:due_on, :nested_under, :list_id], &Changeset.changed?(changeset, &1)) do
+            Changeset.put_change(
+              changeset,
+              :position,
+              next_task_position(Changeset.get_field(changeset, :list_id))
+            )
+          else
+            changeset
+          end
+
         task =
           case apply(Repo, operation, [changeset]) do
             {:ok, task} -> task

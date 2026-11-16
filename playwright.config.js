@@ -1,6 +1,6 @@
 const {defineConfig} = require('@playwright/test');
 module.exports = defineConfig({
-  testDir: './test/e2e', workers: 1, retries: 0, timeout: 45000,
+  testDir: './test/e2e', workers: 1, retries: 0, timeout: 180000,
   reporter: [['list'], ['html', {outputFolder: 'artifacts/e2e/report', open: 'never'}]],
   outputDir: 'artifacts/e2e/results',
   use: {

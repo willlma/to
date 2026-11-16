@@ -1,10 +1,13 @@
 const {test, expect} = require('@playwright/test');
+const {mkdtemp, rm} = require('node:fs/promises');
+const {tmpdir} = require('node:os');
+const {join} = require('node:path');
 
 async function signIn(page, person = 'Will') {
   await page.goto('/auth/google');
   await page.getByRole('link', {name: `Continue as ${person}`}).click();
-  await expect(page).toHaveURL(/\/lists(?:\/\d+)?$/);
   await expect(page.locator('.phx-connected')).toBeVisible();
+  await expect(page).toHaveURL(/\/lists\/\d+$/);
 }
 
 function taskRow(page, title) {
@@ -12,9 +15,11 @@ function taskRow(page, title) {
 }
 
 async function createTask(page, title, options = {}) {
+  await expect(page.locator('.phx-connected')).toBeVisible();
   await expect(page).toHaveURL(/\/lists(?:\/\d+)?$/);
   const listUrl = page.url();
   await page.locator('#quick-title').fill(title);
+  await expect(page).toHaveURL(listUrl + '/tasks/new');
   if (Object.keys(options).length) {
     await page.locator('#task-title').press('Shift+Enter');
     await expect(page.locator('#task-description')).toBeVisible();
@@ -109,7 +114,49 @@ print(json.dumps([dict(r) for r in rows]))`;
   return JSON.parse(execFileSync('python3', ['-c', script, title], {encoding:'utf8'}));
 }
 
-test('household journey: lists, tasks, Google export, reminders, and recovery', async ({page, browser, request}) => {
+async function createList(page, name) {
+  await page.getByRole('button', {name:'New list',exact:true}).click();
+  await page.locator('#list-name').fill(name);
+  await page.locator('#list-form button').click();
+  await expect(page.getByRole('link', {name,exact:true})).toHaveAttribute('aria-current','page');
+  return new URL(page.url()).pathname;
+}
+
+const listNames = page => page.locator('nav[aria-label="Lists"] a').allTextContents();
+const titles = section => section.locator('[name="task[title]"]').evaluateAll(inputs => inputs.map(input => input.value));
+
+// Exercise server validation even when a stale or altered client bypasses the hook.
+async function pushEvent(page,event,payload) {
+  return page.evaluate(({event,payload}) => {
+    const el = document.getElementById('to-app');
+    return window.liveSocket.owner(el).pushHookEvent(el,null,event,payload);
+  },{event,payload});
+}
+
+async function drag(page, source, target, {after = false, horizontal = false, touch = false} = {}) {
+  await source.scrollIntoViewIfNeeded();
+  const start = await source.boundingBox(), end = await target.boundingBox();
+  const from = {x:start.x+start.width/2,y:start.y+start.height/2};
+  const to = {x:end.x+end.width*(horizontal ? (after ? 0.8 : 0.2) : 0.5),
+    y:end.y+end.height*(horizontal ? 0.5 : (after ? 0.8 : 0.2))};
+  if (touch) {
+    const session = await page.context().newCDPSession(page);
+    const point = (x,y) => [{x,y,id:0,radiusX:1,radiusY:1,force:1}];
+    await session.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:point(from.x,from.y)});
+    for (let step=1;step<=8;step++) await session.send('Input.dispatchTouchEvent',{
+      type:'touchMove',touchPoints:point(from.x+(to.x-from.x)*step/8,from.y+(to.y-from.y)*step/8)
+    });
+    await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    await session.detach();
+  } else {
+    await page.mouse.move(from.x,from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x,to.y,{steps:8});
+    await page.mouse.up();
+  }
+}
+
+async function householdJourney({page, browser, request}) {
   // Stub the browser's push-provider boundary; registration, subscription saving,
   // server delivery, and encryption still use the application's real flow.
   const {createECDH, randomBytes} = require('node:crypto');
@@ -1039,7 +1086,8 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     for (const tab of [page,nicole]) await expect(tab.locator('#sync-status')).toBeHidden();
     const state = await googleState(request);
     await test.info().attach('google-http-exchange', {body: JSON.stringify(state, null, 2), contentType:'application/json'});
-    await page.goto(listUrl);
+    await page.getByRole('link', {name:'Groceries',exact:true}).click();
+    await expect(page).toHaveURL(listUrl);
   });
 
   // Finish the same household flow by deleting the list and its contents.
@@ -1108,7 +1156,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', {name:'Delete list Groceries', exact:true}).click();
   for (const tab of [page, nicole]) {
-    await expect(tab).toHaveURL(/\/lists$/);
+    await expect(tab).toHaveURL(/\/lists\/\d+$/);
     await expect(tab.getByRole('link', {name:'Groceries', exact:true})).toHaveCount(0);
     await expect(taskRow(tab, activeTitle)).toHaveCount(0);
     await expect(taskRow(tab, completedTitle)).toHaveCount(0);
@@ -1128,7 +1176,7 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
   await page.getByRole('button',{name:'Edit list Groceries',exact:true}).click();
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', {name:'Delete list Groceries', exact:true}).click();
-  await expect(page).toHaveURL(/\/lists$/);
+  await expect(page).toHaveURL(/\/lists\/\d+$/);
 
   // The remaining list cannot be deleted; its tasks survive and it stays usable.
   const lastListUrl = await page.getByRole('link', {name:'To do', exact:true}).getAttribute('href');
@@ -1240,6 +1288,15 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
       await test.info().attach('completion-notifications',{body:JSON.stringify((await googleState(request)).pushes.slice(beforeCompletion),null,2),contentType:'application/json'});
     });
 
+    await test.step('Keep completion saved when its push provider fails', async () => {
+      await request.post('http://127.0.0.1:4010/__push-response',{data:{status:503}});
+      const assigned = taskRow(page,'Nicole assigned Will an undated task');
+      await assigned.getByRole('checkbox').check();
+      await expect(page.getByRole('alert')).toHaveText("Task saved, but couldn't notify Nicole.");
+      await expect(taskRow(nicole,'Nicole assigned Will an undated task').getByRole('checkbox')).toBeChecked();
+      await assigned.getByRole('checkbox').uncheck();
+      await expect(taskRow(nicole,'Nicole assigned Will an undated task').getByRole('checkbox')).not.toBeChecked();
+    });
     await request.post('http://127.0.0.1:4010/__push-response',{data:{status:503}});
     await createTask(page,'Saved despite failed notification',{assignee:'Nicole'});
     await expect(page.getByRole('alert')).toHaveText("Task saved, but couldn't notify Nicole.");
@@ -1257,272 +1314,489 @@ test('household journey: lists, tasks, Google export, reminders, and recovery', 
     await expect(page.getByRole('heading',{name:'Settings',exact:true})).toBeVisible();
   });
   await nicoleContext.close();
-});
+}
 
-test('dialog routes follow browser history on desktop and mobile', async ({page,browser}) => {
-  await signIn(page);
+async function editingAndRecovery({page, browser}) {
+  await page.goto('/lists');
+  await expect(page.locator('.phx-connected')).toBeVisible();
   const base = await page.locator('nav a[aria-current="page"]').getAttribute('href');
   await page.goto(base);
-  const row = await createTask(page,'History task');
+  const row = await createTask(page,'History task',{due:'2030-10-03'});
   const taskId = await row.getAttribute('data-task-id');
   const mobileContext = await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   const mobile = await mobileContext.newPage();
   await signIn(mobile,'Nicole');
-  for (const [label,tab] of [['desktop',page],['mobile',mobile]]) {
-    await tab.goto(base);
-    const listName = await tab.locator('nav a[aria-current="page"]').innerText();
-    const listDialog = tab.getByRole('dialog',{name:'Edit list',exact:true});
-    const taskDialog = tab.locator('#task-dialog');
-    const saved = tab.locator(`[data-task-id="${taskId}"]`);
-    await tab.evaluate(() => { window.dialogHistoryMarker = 'same document'; });
+  try {
+    await test.step('Follow dialog history on desktop and mobile', async () => {
+      for (const [label,tab] of [['desktop',page],['mobile',mobile]]) {
+        await tab.goto(base);
+        const listName = await tab.locator('nav a[aria-current="page"]').innerText();
+        const listDialog = tab.getByRole('dialog',{name:'Edit list',exact:true});
+        const taskDialog = tab.locator('#task-dialog');
+        const saved = tab.locator(`[data-task-id="${taskId}"]`);
+        await tab.evaluate(() => { window.dialogHistoryMarker = 'same document'; });
 
-    await tab.getByRole('button',{name:`Edit list ${listName}`,exact:true}).click();
-    await expect(tab).toHaveURL(new RegExp(`${base}/edit$`));
-    await listDialog.getByRole('textbox',{name:'List name',exact:true}).fill('Unsaved list name');
-    await tab.goBack();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    await expect(listDialog).toBeHidden();
-    await tab.goForward();
-    await expect(listDialog.getByRole('textbox',{name:'List name',exact:true})).toHaveValue(listName);
-    const listHistoryLength = await tab.evaluate(() => history.length);
-    await listDialog.getByRole('button',{name:'Save',exact:true}).click();
-    await expect(listDialog).toBeHidden();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    expect(await tab.evaluate(() => history.length)).toBe(listHistoryLength);
+        await tab.getByRole('button',{name:`Edit list ${listName}`,exact:true}).click();
+        await expect(tab).toHaveURL(new RegExp(`${base}/edit$`));
+        await listDialog.getByRole('textbox',{name:'List name',exact:true}).fill('Unsaved list name');
+        await tab.goBack();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        await expect(listDialog).toBeHidden();
+        await tab.goForward();
+        await expect(listDialog.getByRole('textbox',{name:'List name',exact:true})).toHaveValue(listName);
+        const listHistoryLength = await tab.evaluate(() => history.length);
+        await listDialog.getByRole('button',{name:'Save',exact:true}).click();
+        await expect(listDialog).toBeHidden();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        expect(await tab.evaluate(() => history.length)).toBe(listHistoryLength);
 
-    await tab.locator('#quick-title').fill(`${label} history draft`);
-    await expect(tab).toHaveURL(new RegExp(`${base}/tasks/new$`));
-    await tab.locator('#task-description').fill('Preserve the complete draft on Back');
-    await expect(tab.locator('#task-title')).toHaveValue(`${label} history draft`);
-    await tab.goBack();
-    await expect(taskDialog).toBeHidden();
-    await expect(tab.locator('#quick-title')).toHaveValue(`${label} history draft`);
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    await tab.goForward();
-    await expect(tab.locator('#task-description')).toHaveValue('Preserve the complete draft on Back');
-    await taskDialog.getByRole('button',{name:'Cancel',exact:true}).click();
-    await expect(taskDialog).toBeHidden();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        await tab.locator('#quick-title').fill(`${label} history draft`);
+        await expect(tab).toHaveURL(new RegExp(`${base}/tasks/new$`));
+        await tab.locator('#task-description').fill('Preserve the complete draft on Back');
+        await expect(tab.locator('#task-title')).toHaveValue(`${label} history draft`);
+        await tab.goBack();
+        await expect(taskDialog).toBeHidden();
+        await expect(tab.locator('#quick-title')).toHaveValue(`${label} history draft`);
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        await tab.goForward();
+        await expect(tab.locator('#task-description')).toHaveValue('Preserve the complete draft on Back');
+        await taskDialog.getByRole('button',{name:'Cancel',exact:true}).click();
+        await expect(taskDialog).toBeHidden();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
 
-    const originalDescription = await saved.getByRole('textbox',{name:'Description',exact:true}).inputValue();
-    await saved.getByRole('button',{name:'Edit History task',exact:true}).click();
-    await expect(tab).toHaveURL(new RegExp(`${base}/tasks/${taskId}/edit$`));
-    await tab.locator('#task-description').fill('Discard on Back');
-    await tab.goBack();
-    await expect(taskDialog).toBeHidden();
-    await expect(saved.getByRole('textbox',{name:'Description',exact:true})).toHaveValue(originalDescription);
-    await expect(tab.locator('#quick-title')).toHaveValue(`${label} history draft`);
-    await tab.goForward();
-    await expect(tab.locator('#task-description')).toHaveValue(originalDescription);
-    await tab.locator('#task-description').fill(`${label} saved edit`);
-    const taskHistoryLength = await tab.evaluate(() => history.length);
-    await taskDialog.getByRole('button',{name:'Save',exact:true}).click();
-    await expect(taskDialog).toBeHidden();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    await expect(saved.getByRole('textbox',{name:'Description',exact:true})).toHaveValue(`${label} saved edit`);
-    expect(await tab.evaluate(() => history.length)).toBe(taskHistoryLength);
-    expect(await tab.evaluate(() => window.dialogHistoryMarker)).toBe('same document');
-    await tab.locator('#quick-title').click();
-    await expect(tab.locator('#task-description')).toHaveValue('Preserve the complete draft on Back');
-    await taskDialog.getByRole('button',{name:'Cancel',exact:true}).click();
-    await expect(taskDialog).toBeHidden();
-    await tab.screenshot({path:`artifacts/e2e/dialog-history-${label}.png`,fullPage:true});
+        const originalDescription = await saved.getByRole('textbox',{name:'Description',exact:true}).inputValue();
+        if (label === 'mobile') {
+          const edit = saved.getByRole('button',{name:'Edit History task',exact:true});
+          await edit.scrollIntoViewIfNeeded();
+          const box = await edit.boundingBox();
+          for (const fraction of [0.15,0.5,0.85]) {
+            expect(await tab.evaluate(({x,y}) => document.elementFromPoint(x,y)?.closest('button')?.id,
+              {x:box.x+box.width*fraction,y:box.y+box.height/2})).toBe(await edit.getAttribute('id'));
+          }
+        }
+        await saved.getByRole('button',{name:'Edit History task',exact:true}).click();
+        await expect(tab).toHaveURL(new RegExp(`${base}/tasks/${taskId}/edit$`));
+        await tab.locator('#task-description').fill('Discard on Back');
+        await tab.goBack();
+        await expect(taskDialog).toBeHidden();
+        await expect(saved.getByRole('textbox',{name:'Description',exact:true})).toHaveValue(originalDescription);
+        await expect(tab.locator('#quick-title')).toHaveValue(`${label} history draft`);
+        await tab.goForward();
+        await expect(tab.locator('#task-description')).toHaveValue(originalDescription);
+        await tab.locator('#task-description').fill(`${label} saved edit`);
+        const taskHistoryLength = await tab.evaluate(() => history.length);
+        await taskDialog.getByRole('button',{name:'Save',exact:true}).click();
+        await expect(taskDialog).toBeHidden();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        await expect(saved.getByRole('textbox',{name:'Description',exact:true})).toHaveValue(`${label} saved edit`);
+        expect(await tab.evaluate(() => history.length)).toBe(taskHistoryLength);
+        expect(await tab.evaluate(() => window.dialogHistoryMarker)).toBe('same document');
+        await tab.locator('#quick-title').click();
+        await expect(tab.locator('#task-description')).toHaveValue('Preserve the complete draft on Back');
+        await taskDialog.getByRole('button',{name:'Cancel',exact:true}).click();
+        await expect(taskDialog).toBeHidden();
+        await tab.screenshot({path:`artifacts/e2e/dialog-history-${label}.png`,fullPage:true});
 
-    await tab.goto(`${base}/edit`);
-    await expect(listDialog).toBeVisible();
-    await listDialog.getByRole('button',{name:'Cancel',exact:true}).click();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    await tab.goto(`${base}/tasks/${taskId}/edit`);
-    await tab.reload();
-    await expect(tab.locator('#task-description')).toHaveValue(`${label} saved edit`);
-    await taskDialog.getByRole('button',{name:'Cancel',exact:true}).click();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    const disposable = await createTask(tab,`${label} deleted history task`);
-    await deleteTask(tab,disposable);
-    await tab.goForward();
-    await expect(tab).toHaveURL(new RegExp(`${base}$`));
-    await expect(taskDialog).toBeHidden();
-    await expect(disposable).toHaveCount(0);
+        await tab.goto(`${base}/edit`);
+        await expect(listDialog).toBeVisible();
+        await listDialog.getByRole('button',{name:'Cancel',exact:true}).click();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        await tab.goto(`${base}/tasks/${taskId}/edit`);
+        await tab.reload();
+        await expect(tab.locator('#task-description')).toHaveValue(`${label} saved edit`);
+        await taskDialog.getByRole('button',{name:'Cancel',exact:true}).click();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        const disposable = await createTask(tab,`${label} deleted history task`);
+        await deleteTask(tab,disposable);
+        await tab.goForward();
+        await expect(tab).toHaveURL(new RegExp(`${base}$`));
+        await expect(taskDialog).toBeHidden();
+        await expect(disposable).toHaveCount(0);
+      }
+    });
+
+    await test.step('Move the edited task by touch and tap to complete it', async () => {
+      const row = taskRow(mobile,'History task');
+      await createTask(mobile,'Mobile drag destination',{group:'Mobile group'});
+      // Exercise the iOS touch path independently of Chromium's pointer emulation.
+      await mobile.locator('input[data-group="Mobile group"]').scrollIntoViewIfNeeded();
+      await row.getByRole('checkbox').evaluate((grip) => {
+        const target = document.querySelector('input[data-group="Mobile group"]');
+        const start = grip.getBoundingClientRect(), end = target.getBoundingClientRect();
+        const fire = (type,x,y) => {
+          const event = new Event(type,{bubbles:true,cancelable:true});
+          Object.defineProperty(event,'touches',{value:type === 'touchend' ? [] : [{clientX:x,clientY:y}]});
+          grip.dispatchEvent(event);
+        };
+        fire('touchstart',start.x+start.width/2,start.y+start.height/2);
+        fire('touchmove',end.x+end.width/2,end.y+end.height/2);
+        fire('touchend',end.x,end.y);
+      });
+      await expect(row).toHaveAttribute('data-group','Mobile group');
+      await expect(row.getByRole('checkbox')).not.toBeChecked();
+      await row.getByRole('checkbox').evaluate(grip => {
+        for (const type of ['touchstart','touchend']) {
+          const event = new Event(type,{bubbles:true,cancelable:true});
+          Object.defineProperty(event,'touches',{value:type === 'touchstart' ? [{clientX:0,clientY:0}] : []});
+          grip.dispatchEvent(event);
+        }
+      });
+      await expect(row.getByRole('checkbox')).toBeChecked();
+      await mobile.screenshot({path:'artifacts/e2e/mobile-edit-and-drag.png',fullPage:true});
+    });
+
+    await test.step('Recover offline checkmarks without losing concurrent edits', async () => {
+      await page.getByRole('button', {name:'New list',exact:true}).click();
+      await page.locator('#list-name').fill('Offline verification');
+      await page.locator('#list-form').getByRole('button').click();
+      await expect(page.locator('#list-name')).toBeHidden();
+      const today = new Date().toISOString().slice(0,10);
+      const laterDate = new Date(today + 'T12:00:00Z');
+      laterDate.setUTCDate(laterDate.getUTCDate()+31);
+      const laterDue = laterDate.toISOString().slice(0,10);
+      const near = await createTask(page, 'Soon offline', {due:today});
+      const undated = await createTask(page, 'Undated offline');
+      const later = await createTask(page, 'Later offline', {due:laterDue});
+      const removed = await createTask(page, 'Removed while offline');
+      await createTask(page, 'Grouped soon', {due:today,group:'Verification group'});
+      await createTask(page, 'Grouped later', {due:laterDue,group:'Verification group'});
+      const ungrouped = page.getByRole('region', {name:'Ungrouped tasks',exact:true});
+      await expect(ungrouped.getByRole('separator')).toHaveCount(2);
+      await expect(near.locator('xpath=following-sibling::li[1]').getByRole('separator')).toHaveCount(1);
+      await expect(later.locator('xpath=preceding-sibling::li[1]').getByRole('separator')).toHaveCount(1);
+      await expect(page.locator('section[data-drop-group="Verification group"]').getByRole('separator')).toHaveCount(1);
+      await page.screenshot({path:'artifacts/e2e/deadline-separators.png',fullPage:true});
+      // Wrapping the grip in a form must preserve dragging and keyboard group moves.
+      await undated.getByRole('checkbox').dragTo(page.locator('input[data-group="Verification group"]'));
+      await expect(undated).toHaveAttribute('data-group', 'Verification group');
+      await expect(undated.getByRole('checkbox')).not.toBeChecked();
+      await undated.getByRole('checkbox').press('Alt+ArrowUp');
+      await expect(undated).toHaveAttribute('data-group', '');
+      await expect(undated.getByRole('checkbox')).not.toBeChecked();
+
+      const nicole = mobile;
+      await nicole.getByRole('link', {name:'Offline verification',exact:true}).click();
+      const nicoleNear = taskRow(nicole, 'Soon offline');
+
+      await page.context().setOffline(true);
+      // Chromium preserves open WebSockets during offline emulation; close it explicitly.
+      await page.evaluate(() => window.liveSocket.disconnect());
+      await expect(page.locator('#connection-status')).toBeVisible();
+      await near.getByRole('checkbox').check();
+      await undated.getByRole('checkbox').check();
+      await undated.getByRole('checkbox').uncheck();
+      await undated.getByRole('checkbox').check();
+      // Returning to the original state should not overwrite a later remote change.
+      await later.getByRole('checkbox').check();
+      await later.getByRole('checkbox').uncheck();
+      await removed.getByRole('checkbox').check();
+      await expect(near.getByRole('checkbox')).toBeChecked();
+      await expect(undated.getByRole('checkbox')).toBeChecked();
+      await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'none');
+      await expect(nicoleNear.getByRole('checkbox')).not.toBeChecked();
+      await page.screenshot({path:'artifacts/e2e/offline-checkmarks.png',fullPage:true});
+
+      // Another person's edits must survive completion replay; deletions must not be undone.
+      await nicoleNear.getByRole('textbox', {name:'Description',exact:true}).fill('Keep this newer note');
+      await nicoleNear.getByRole('textbox', {name:'Description',exact:true}).press('Tab');
+      await deleteTask(nicole, taskRow(nicole, 'Removed while offline'));
+      await taskRow(nicole, 'Later offline').getByRole('checkbox').check();
+      await page.context().setOffline(false);
+      await page.evaluate(() => window.liveSocket.connect());
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      await expect(nicoleNear.getByRole('checkbox')).toBeChecked();
+      await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'line-through');
+      await expect(taskRow(nicole, 'Undated offline').getByRole('checkbox')).toBeChecked();
+      await expect(later.getByRole('checkbox')).toBeChecked();
+      await expect(near.getByRole('textbox', {name:'Description',exact:true})).toHaveValue('Keep this newer note');
+      await expect(removed).toHaveCount(0);
+      // A second reconnect must not flip an already-recovered completion.
+      await page.evaluate(() => window.liveSocket.disconnect());
+      await expect(page.locator('#connection-status')).toBeVisible();
+      await page.evaluate(() => window.liveSocket.connect());
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      await expect(near.getByRole('checkbox')).toBeChecked();
+      await expect(later.getByRole('checkbox')).toBeChecked();
+
+      await page.context().setOffline(true);
+      await page.evaluate(() => window.liveSocket.disconnect());
+      await near.getByRole('checkbox').uncheck();
+      await expect(near.getByRole('checkbox')).not.toBeChecked();
+      await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'line-through');
+      await page.context().setOffline(false);
+      // The scope is form recovery in this page, not persistence across a reload.
+      await page.reload();
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      await expect(near.getByRole('checkbox')).toBeChecked();
+      await expect(undated.getByRole('checkbox')).toBeChecked();
+      await page.screenshot({path:'artifacts/e2e/recovered-checkmarks.png',fullPage:true});
+    });
+  } finally {
+    await mobileContext.close();
   }
-  await mobileContext.close();
-});
+}
 
-test('offline checkmarks and deadline separators', async ({page, browser}) => {
-  await signIn(page);
-  await page.getByRole('button', {name:'New list',exact:true}).click();
-  await page.locator('#list-name').fill('Offline verification');
-  await page.locator('#list-form').getByRole('button').click();
-  await expect(page.locator('#list-name')).toBeHidden();
-  const today = new Date().toISOString().slice(0,10);
-  const laterDate = new Date(today + 'T12:00:00Z');
-  laterDate.setUTCDate(laterDate.getUTCDate()+31);
-  const laterDue = laterDate.toISOString().slice(0,10);
-  const near = await createTask(page, 'Soon offline', {due:today});
-  const undated = await createTask(page, 'Undated offline');
-  const later = await createTask(page, 'Later offline', {due:laterDue});
-  const removed = await createTask(page, 'Removed while offline');
-  await createTask(page, 'Grouped soon', {due:today,group:'Verification group'});
-  await createTask(page, 'Grouped later', {due:laterDue,group:'Verification group'});
-  const ungrouped = page.getByRole('region', {name:'Ungrouped tasks',exact:true});
-  await expect(ungrouped.getByRole('separator')).toHaveCount(2);
-  await expect(near.locator('xpath=following-sibling::li[1]').getByRole('separator')).toHaveCount(1);
-  await expect(later.locator('xpath=preceding-sibling::li[1]').getByRole('separator')).toHaveCount(1);
-  await expect(page.locator('section[data-drop-group="Verification group"]').getByRole('separator')).toHaveCount(1);
-  await page.screenshot({path:'artifacts/e2e/deadline-separators.png',fullPage:true});
-  // Wrapping the grip in a form must preserve dragging and keyboard group moves.
-  await undated.getByRole('checkbox').dragTo(page.locator('input[data-group="Verification group"]'));
-  await expect(undated).toHaveAttribute('data-group', 'Verification group');
-  await expect(undated.getByRole('checkbox')).not.toBeChecked();
-  await undated.getByRole('checkbox').press('Alt+ArrowUp');
-  await expect(undated).toHaveAttribute('data-group', '');
-  await expect(undated.getByRole('checkbox')).not.toBeChecked();
+async function orderingAndPreferences({page, browser, request}) {
+  const context = await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const other = await context.newPage();
+  try {
+    await request.post('http://127.0.0.1:4010/__google-sync-enabled',{data:{enabled:true}});
+    await page.goto('/lists');
+    await expect(page.locator('.phx-connected')).toBeVisible();
+    const oldest = await page.locator('nav a').first().getAttribute('href');
+    const originalNames = await listNames(page);
+    const a = await createList(page,'Order A');
+    const b = await createList(page,'Order B');
+    const c = await createList(page,'Order C');
+    await signIn(other); // The same account on a different client.
+    await other.goto(b);
+    await expect(other.getByRole('link',{name:'Order B',exact:true})).toHaveAttribute('aria-current','page');
 
-  const context = await browser.newContext();
-  const nicole = await context.newPage();
-  await signIn(nicole, 'Nicole');
-  await nicole.getByRole('link', {name:'Offline verification',exact:true}).click();
-  const nicoleNear = taskRow(nicole, 'Soon offline');
+    await test.step('Drag list tabs without navigating; share and persist the order', async () => {
+      const before = page.url();
+      await drag(page,page.getByRole('link',{name:'Order C',exact:true}),page.locator('nav a').first(),{horizontal:true});
+      const expected = ['Order C',...originalNames,'Order A','Order B'];
+      await expect.poll(() => listNames(page)).toEqual(expected);
+      await expect.poll(() => listNames(other)).toEqual(expected);
+      await expect(page).toHaveURL(before);
+      await expect(other).toHaveURL(new URL(b,page.url()).href);
+      await page.reload();
+      await expect.poll(() => listNames(page)).toEqual(expected);
+      await createList(page,'Order D');
+      await expect.poll(() => listNames(page)).toEqual([...expected,'Order D']);
+      const ids = await page.locator('nav a').evaluateAll(links => links.map(link => link.dataset.dropList));
+      for (const stale of [ids.slice(1),[...ids,ids[0]]]) {
+        await pushEvent(page,'reorder-lists',{ids:stale});
+        await expect(page.getByText('The lists changed. Please try dragging again.',{exact:true})).toBeVisible();
+        await expect.poll(() => listNames(page)).toEqual([...expected,'Order D']);
+      }
+      await page.goto(c);
+      await page.screenshot({path:'artifacts/e2e/list-order-desktop.png',fullPage:true});
 
-  await page.context().setOffline(true);
-  // Chromium preserves open WebSockets during offline emulation; close it explicitly.
-  await page.evaluate(() => window.liveSocket.disconnect());
-  await expect(page.locator('#connection-status')).toBeVisible();
-  await near.getByRole('checkbox').check();
-  await undated.getByRole('checkbox').check();
-  await undated.getByRole('checkbox').uncheck();
-  await undated.getByRole('checkbox').check();
-  // Returning to the original state should not overwrite a later remote change.
-  await later.getByRole('checkbox').check();
-  await later.getByRole('checkbox').uncheck();
-  await removed.getByRole('checkbox').check();
-  await expect(near.getByRole('checkbox')).toBeChecked();
-  await expect(undated.getByRole('checkbox')).toBeChecked();
-  await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'none');
-  await expect(nicoleNear.getByRole('checkbox')).not.toBeChecked();
-  await page.screenshot({path:'artifacts/e2e/offline-checkmarks.png',fullPage:true});
+      await request.post('http://127.0.0.1:4010/tasks/v1/lists/@default/tasks',{
+        headers:{Authorization:'Bearer access-will'},data:{title:'Import after tab reorder',status:'needsAction'}
+      });
+      await other.getByRole('link',{name:'Settings for Will',exact:true}).click();
+      await other.getByRole('button',{name:'Import Google Tasks',exact:true}).click();
+      await expect(other.getByText(/Imported \d+ tasks/)).toBeVisible();
+      await other.getByRole('link',{name:'Back to lists',exact:true}).click();
+      await expect(other).toHaveURL(new URL(b,other.url()).href);
+      await page.goto(oldest);
+      await expect(page.locator('[name="task[title]"][value="Import after tab reorder"]')).toBeVisible();
+      await page.goto(c);
+      await expect(page.locator('[name="task[title]"][value="Import after tab reorder"]')).toHaveCount(0);
+    });
 
-  // Another person's edits must survive completion replay; deletions must not be undone.
-  await nicoleNear.getByRole('textbox', {name:'Description',exact:true}).fill('Keep this newer note');
-  await nicoleNear.getByRole('textbox', {name:'Description',exact:true}).press('Tab');
-  await deleteTask(nicole, taskRow(nicole, 'Removed while offline'));
-  await taskRow(nicole, 'Later offline').getByRole('checkbox').check();
-  await page.context().setOffline(false);
-  await page.evaluate(() => window.liveSocket.connect());
-  await expect(page.locator('.phx-connected')).toBeVisible();
-  await expect(nicoleNear.getByRole('checkbox')).toBeChecked();
-  await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'line-through');
-  await expect(taskRow(nicole, 'Undated offline').getByRole('checkbox')).toBeChecked();
-  await expect(later.getByRole('checkbox')).toBeChecked();
-  await expect(near.getByRole('textbox', {name:'Description',exact:true})).toHaveValue('Keep this newer note');
-  await expect(removed).toHaveCount(0);
-  // A second reconnect must not flip an already-recovered completion.
-  await page.evaluate(() => window.liveSocket.disconnect());
-  await expect(page.locator('#connection-status')).toBeVisible();
-  await page.evaluate(() => window.liveSocket.connect());
-  await expect(page.locator('.phx-connected')).toBeVisible();
-  await expect(near.getByRole('checkbox')).toBeChecked();
-  await expect(later.getByRole('checkbox')).toBeChecked();
+    await test.step('Restore from settings and PWA start URL independently; explicit links and history win', async () => {
+      await page.getByRole('link',{name:'Settings for Will',exact:true}).click();
+      await page.getByRole('link',{name:'Back to lists',exact:true}).click();
+      await expect(page).toHaveURL(new URL(c,page.url()).href);
+      for (const [tab,path] of [[page,c],[other,b]]) {
+        await tab.goto('/');
+        await expect(tab).toHaveURL(new URL(path,tab.url()).href);
+      }
+      await page.goto(a);
+      await expect(page.getByRole('link',{name:'Order A',exact:true})).toHaveAttribute('aria-current','page');
+      await page.getByRole('link',{name:'Order C',exact:true}).click();
+      await expect(page).toHaveURL(new URL(c,page.url()).href);
+      await page.goBack();
+      await expect(page).toHaveURL(new URL(a,page.url()).href);
+      await page.goForward();
+      await expect(page).toHaveURL(new URL(c,page.url()).href);
+      await page.reload();
+      await expect(page.getByRole('link',{name:'Order C',exact:true})).toHaveAttribute('aria-current','page');
+    });
 
-  await page.context().setOffline(true);
-  await page.evaluate(() => window.liveSocket.disconnect());
-  await near.getByRole('checkbox').uncheck();
-  await expect(near.getByRole('checkbox')).not.toBeChecked();
-  await expect(near.locator('.task-title')).toHaveCSS('text-decoration-line', 'line-through');
-  await page.context().setOffline(false);
-  // The scope is form recovery in this page, not persistence across a reload.
-  await page.reload();
-  await expect(page.locator('.phx-connected')).toBeVisible();
-  await expect(near.getByRole('checkbox')).toBeChecked();
-  await expect(undated.getByRole('checkbox')).toBeChecked();
-  await page.screenshot({path:'artifacts/e2e/recovered-checkmarks.png',fullPage:true});
-  await context.close();
-});
+    await test.step('Reorder by touch without changing the open list', async () => {
+      await drag(other,other.getByRole('link',{name:'Order C',exact:true}),other.getByRole('link',{name:originalNames[0],exact:true}),{horizontal:true,after:true,touch:true});
+      const expected = [originalNames[0],'Order C',...originalNames.slice(1),'Order A','Order B','Order D'];
+      await expect.poll(() => listNames(other)).toEqual(expected);
+      await expect.poll(() => listNames(page)).toEqual(expected);
+      await expect(page).toHaveURL(new URL(c,page.url()).href);
+      await expect(other).toHaveURL(new URL(b,other.url()).href);
+      await other.screenshot({path:'artifacts/e2e/list-order-touch.png',fullPage:true});
+    });
 
+    await test.step('Reorder undated and same-date tasks while preserving date priority and groups', async () => {
+      const today = new Date().toISOString().slice(0,10);
+      const past = '2020-01-01', later = '2090-01-01';
+      const first = await createTask(page,'Undated first');
+      const second = await createTask(page,'Undated second');
+      await createTask(page,'Earlier date',{due:past});
+      const sameA = await createTask(page,'Same date first',{due:today});
+      const sameB = await createTask(page,'Same date second',{due:today});
+      const futureA = await createTask(page,'Future first',{due:later});
+      const futureB = await createTask(page,'Future second',{due:later});
+      await createTask(page,'Other group first',{group:'Other group'});
+      const groupA = await createTask(page,'Grouped first',{group:'Order group'});
+      await createTask(page,'Other group second',{group:'Other group'});
+      const groupB = await createTask(page,'Grouped second',{group:'Order group'});
+      await other.goto(c);
+      const section = page.locator('section[data-drop-group=""]');
+      const expected = ['Earlier date','Same date first','Same date second','Undated second','Undated first','Future first','Future second'];
+      const stateBefore = await (await request.get('http://127.0.0.1:4010/__state')).json();
+      await drag(page,second.getByRole('checkbox'),first);
+      await expect.poll(() => titles(section)).toEqual(expected);
+      await drag(page,sameA.getByRole('checkbox'),sameB,{after:true});
+      [expected[1],expected[2]] = [expected[2],expected[1]];
+      await expect.poll(() => titles(section)).toEqual(expected);
+      await drag(page,futureB.getByRole('checkbox'),futureA);
+      [expected[5],expected[6]] = [expected[6],expected[5]];
+      await expect.poll(() => titles(section)).toEqual(expected);
+      await drag(page,first.getByRole('checkbox'),sameB); // A different date cannot be crossed.
+      await expect.poll(() => titles(section)).toEqual(expected);
+      await pushEvent(page,'reorder-task',{
+        id:await first.getAttribute('data-task-id'),target_id:await sameB.getAttribute('data-task-id'),after:false
+      });
+      await expect(page.getByText('Could not save. Please try again.',{exact:true})).toBeVisible();
+      await expect.poll(() => titles(section)).toEqual(expected);
+      await drag(page,groupB.getByRole('checkbox'),groupA);
+      await expect.poll(() => titles(page.locator('section[data-drop-group="Order group"]'))).toEqual(['Grouped second','Grouped first']);
+      await expect.poll(() => page.locator('section input[data-group]').evaluateAll(inputs => inputs.map(input => input.value))).toEqual(['Other group','Order group']);
+      await expect.poll(() => titles(other.locator('section[data-drop-group=""]'))).toEqual(expected);
+      await page.reload();
+      await expect.poll(() => titles(section)).toEqual(expected);
+      await expect.poll(() => titles(page.locator('section[data-drop-group="Order group"]'))).toEqual(['Grouped second','Grouped first']);
+      await expect(section.getByRole('separator')).toHaveCount(2);
+      await expect(second.getByRole('checkbox')).not.toBeChecked();
+      const stateAfter = await (await request.get('http://127.0.0.1:4010/__state')).json();
+      expect(stateAfter.jobs.filter(job => job.worker === 'To.SyncWorker')).toEqual(stateBefore.jobs.filter(job => job.worker === 'To.SyncWorker'));
+      await page.screenshot({path:'artifacts/e2e/task-range-order.png',fullPage:true});
+      // The phone uses the same checkbox gesture for ordering as for group moves.
+      const phoneFirst = other.locator('[data-task-id]').filter({has:other.locator('[name="task[title]"][value="Undated first"]')});
+      const phoneSecond = other.locator('[data-task-id]').filter({has:other.locator('[name="task[title]"][value="Undated second"]')});
+      await drag(other,phoneFirst.getByRole('checkbox'),phoneSecond,{touch:true});
+      [expected[3],expected[4]] = [expected[4],expected[3]];
+      await expect.poll(() => titles(section)).toEqual(expected);
+    });
 
-test('mobile edit target and touch dragging', async ({page}) => {
-  await page.setViewportSize({width:390,height:844});
-  await signIn(page);
-  const row = await createTask(page,'Mobile hit targets',{due:'2030-10-03'});
-  await createTask(page,'Mobile drag destination',{group:'Mobile group'});
-  const edit = row.getByRole('button',{name:'Edit Mobile hit targets',exact:true});
-  const box = await edit.boundingBox();
-  for (const fraction of [0.15,0.5,0.85]) {
-    expect(await page.evaluate(({x,y}) => document.elementFromPoint(x,y)?.closest('button')?.id,
-      {x:box.x+box.width*fraction,y:box.y+box.height/2})).toBe(await edit.getAttribute('id'));
+    await test.step('A deleted remembered list falls back and a new account has its own preference', async () => {
+      await page.getByRole('button',{name:'Edit list Order C',exact:true}).click();
+      page.once('dialog',dialog => dialog.accept());
+      await page.getByRole('button',{name:'Delete list Order C',exact:true}).click();
+      await expect(page.getByRole('link',{name:originalNames[0],exact:true})).toHaveAttribute('aria-current','page');
+      await other.goto('/');
+      await expect(other.getByRole('link',{name:originalNames[0],exact:true})).toHaveAttribute('aria-current','page');
+      await page.goto(a);
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      await signIn(page,'Nicole');
+      await expect(page.getByRole('link',{name:originalNames[0],exact:true})).toHaveAttribute('aria-current','page');
+      await signIn(page,'Will');
+      await expect(page).toHaveURL(new URL(a,page.url()).href);
+      await page.screenshot({path:'artifacts/e2e/last-list-deleted.png',fullPage:true});
+    });
+
+    await test.step('Background tab updates cannot overwrite the last opened list', async () => {
+      const sibling = await page.context().newPage();
+      try {
+        await sibling.goto(b);
+        await expect(sibling.locator('.phx-connected')).toBeVisible();
+        await expect(sibling.getByRole('link',{name:'Order B',exact:true})).toHaveAttribute('aria-current','page');
+        await other.goto(a);
+        await createTask(other,'Background tab update');
+        await expect(page.locator('[name="task[title]"][value="Background tab update"]')).toBeVisible();
+        await page.goto('/');
+        await expect(page).toHaveURL(new URL(b,page.url()).href);
+      } finally {
+        await sibling.close();
+      }
+    });
+    await test.step('Keep navigation usable with malformed or blocked preference storage', async () => {
+      await page.evaluate(() => localStorage.setItem('to:last-lists','{malformed'));
+      await page.goto('/lists');
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      await page.evaluate(() => localStorage.setItem('to:last-lists','[]'));
+      await page.goto('/lists');
+      await expect(page).toHaveURL(/\/lists\/\d+$/);
+      await page.addInitScript(() => {
+        const get = Storage.prototype.getItem, set = Storage.prototype.setItem;
+        Storage.prototype.getItem = function(key) {
+          if (this === localStorage) throw new DOMException('Storage blocked','SecurityError');
+          return get.call(this,key);
+        };
+        Storage.prototype.setItem = function(key,value) {
+          if (this === localStorage) throw new DOMException('Storage blocked','SecurityError');
+          return set.call(this,key,value);
+        };
+      });
+      await page.goto('/lists');
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      const link = page.locator('nav a').last();
+      const path = await link.getAttribute('href');
+      await link.click();
+      await expect(page).toHaveURL(new URL(path,page.url()).href);
+      await page.reload();
+      await expect(page.locator('.phx-connected')).toBeVisible();
+      await expect(page).toHaveURL(new URL(path,page.url()).href);
+    });
+  } finally {
+    await context.close();
   }
-  await edit.click();
-  await expect(page.locator('#task-description')).toBeVisible();
-  await page.getByRole('button',{name:'Cancel',exact:true}).click();
-  // Exercise the iOS touch path independently of Chromium's pointer emulation.
-  await row.getByRole('checkbox').evaluate((grip) => {
-    const target = document.querySelector('input[data-group="Mobile group"]');
-    const start = grip.getBoundingClientRect(), end = target.getBoundingClientRect();
-    const fire = (type,x,y) => {
-      const event = new Event(type,{bubbles:true,cancelable:true});
-      Object.defineProperty(event,'touches',{value:type === 'touchend' ? [] : [{clientX:x,clientY:y}]});
-      grip.dispatchEvent(event);
-    };
-    fire('touchstart',start.x+start.width/2,start.y+start.height/2);
-    fire('touchmove',end.x+end.width/2,end.y+end.height/2);
-    fire('touchend',end.x,end.y);
-  });
-  await expect(row).toHaveAttribute('data-group','Mobile group');
-  await expect(row.getByRole('checkbox')).not.toBeChecked();
-  await row.getByRole('checkbox').evaluate(grip => {
-    for (const type of ['touchstart','touchend']) {
-      const event = new Event(type,{bubbles:true,cancelable:true});
-      Object.defineProperty(event,'touches',{value:type === 'touchstart' ? [{clientX:0,clientY:0}] : []});
-      grip.dispatchEvent(event);
-    }
-  });
-  await expect(row.getByRole('checkbox')).toBeChecked();
-  await page.screenshot({path:'artifacts/e2e/mobile-edit-and-drag.png',fullPage:true});
-});
+}
 
-test('completion pushes reach the assigner and failures preserve completion', async ({page,browser,request}) => {
-  const {createECDH,randomBytes} = require('node:crypto');
-  const otherContext = await browser.newContext();
-  const nicole = await otherContext.newPage();
-  await signIn(page);
-  await signIn(nicole,'Nicole');
-  const subscriptions = [];
-  for (const [tab,name] of [[page,'will'],[nicole,'nicole']]) {
-    const key = createECDH('prime256v1'); key.generateKeys();
-    const subscription = {endpoint:name === 'will' ? 'https://fcm.googleapis.com/e2e' : 'https://fcm.googleapis.com/completion-nicole',time_zone:'America/Los_Angeles',
-      keys:{p256dh:key.getPublicKey().toString('base64url'),auth:randomBytes(16).toString('base64url')}};
-    const status = await tab.evaluate(async subscription => (await fetch('/api/push/subscriptions',{
-      method:'POST',headers:{'content-type':'application/json','x-csrf-token':document.querySelector('meta[name="csrf-token"]').content},
-      body:JSON.stringify(subscription)
-    })).status,subscription);
-    expect(status).toBe(200);
-    subscriptions.push(subscription);
+async function browserRestarts({playwright}, testInfo) {
+  const profile = await mkdtemp(join(tmpdir(), 'town-session-'));
+  let context;
+  const openBrowser = async () => {
+    context = await playwright.chromium.launchPersistentContext(profile, {
+      ...testInfo.project.use.launchOptions,
+      baseURL: testInfo.project.use.baseURL
+    });
+    return context.pages()[0];
+  };
+  const closeBrowser = async () => {
+    await context.close();
+    context = null;
+  };
+  const sessionCookie = async () =>
+    (await context.cookies()).find(cookie => cookie.name === '_to_key');
+  const expectLongLivedCookie = async () => {
+    expect((await sessionCookie()).expires).toBeGreaterThan(
+      Date.now() / 1000 + 390 * 24 * 60 * 60
+    );
+  };
+
+  try {
+    let page = await openBrowser();
+    await page.goto('/auth/google');
+    await page.getByRole('link', {name:'Continue as Will'}).click();
+    await expect(page).toHaveURL(/\/lists(?:\/\d+)?$/);
+    await page.getByRole('button',{name:'New list',exact:true}).click();
+    await page.locator('#list-name').fill('Browser restart list');
+    await page.locator('#list-form button').click();
+    await expect(page.getByRole('link',{name:'Browser restart list',exact:true})).toHaveAttribute('aria-current','page');
+    const rememberedUrl = page.url();
+    await expectLongLivedCookie();
+    await closeBrowser();
+
+    page = await openBrowser();
+    await page.goto('/'); // A PWA starts at the manifest's root URL.
+    await expect(page.locator('.phx-connected')).toBeVisible();
+    await expect(page).toHaveURL(rememberedUrl);
+
+    // A returning visit must extend an existing cookie's expiry as well.
+    await context.addCookies([{
+      ...await sessionCookie(), expires:Date.now() / 1000 + 24 * 60 * 60
+    }]);
+    await page.goto('/settings');
+    await expectLongLivedCookie();
+    await page.getByRole('button', {name:'Sign out',exact:true}).click();
+    await expect(page).toHaveURL('http://127.0.0.1:4002/');
+    await closeBrowser();
+
+    page = await openBrowser();
+    await page.goto('/lists');
+    await expect(page).toHaveURL('http://127.0.0.1:4002/');
+  } finally {
+    if (context) await closeBrowser();
+    await rm(profile, {recursive:true, force:true});
   }
-  for (const [creator,completer,assignee,name,subscription] of [
-    [page,nicole,'Nicole','Nicole',subscriptions[0]],
-    [nicole,page,'Will','Will',subscriptions[1]]
-  ]) {
-    const title = `Completion check ${name}`;
-    await createTask(creator,title,{assignee});
-    await taskRow(completer,title).getByRole('checkbox').check();
-    await expect.poll(async () => (await googleState(request)).pushes.filter(p => p.payload.body === title && p.payload.title === `${name} completed your task`).length).toBe(1);
-    const delivery = (await googleState(request)).pushes.find(p => p.payload.body === title && p.payload.title === `${name} completed your task`);
-    expect(delivery.endpoint).toBe(subscription.endpoint);
-    await taskRow(completer,title).getByRole('checkbox').uncheck();
-    await expect(taskRow(creator,title).getByRole('checkbox')).not.toBeChecked();
-    expect((await googleState(request)).pushes.filter(p => p.payload.body === title && p.payload.title === `${name} completed your task`)).toHaveLength(1);
-  }
-  const before = (await googleState(request)).pushes.length;
-  for (const [title,options] of [['Completion self',{assignee:'Will'}],['Completion unassigned',{}],['Completion by creator',{assignee:'Nicole'}]]) {
-    const row = await createTask(page,title,options);
-    await row.getByRole('checkbox').check();
-    await expect(taskRow(nicole,title).getByRole('checkbox')).toBeChecked();
-  }
-  expect((await googleState(request)).pushes.filter(p => p.payload.title.includes('completed your task') && p.payload.body.startsWith('Completion '))).toHaveLength(2);
-  await createTask(page,'Completion delivery failure',{assignee:'Nicole'});
-  await request.post('http://127.0.0.1:4010/__push-response',{data:{status:503}});
-  await taskRow(nicole,'Completion delivery failure').getByRole('checkbox').check();
-  await expect(nicole.getByRole('alert')).toHaveText("Task saved, but couldn't notify Will.");
-  await expect(taskRow(page,'Completion delivery failure').getByRole('checkbox')).toBeChecked();
-  await test.info().attach('completion-push-deliveries',{body:JSON.stringify((await googleState(request)).pushes.slice(before),null,2),contentType:'application/json'});
-  await otherContext.close();
+}
+
+test('household journey: tasks, sync, editing, ordering, recovery, and browser restarts', async ({page, browser, request, playwright}, testInfo) => {
+  const fixtures = {page, browser, request, playwright};
+  await test.step('Shared tasks, Google sync, reminders, and notifications', () => householdJourney(fixtures));
+  await test.step('Desktop and mobile editing, history, and offline recovery', () => editingAndRecovery(fixtures));
+  await test.step('Shared ordering and per-client preferences', () => orderingAndPreferences(fixtures));
+  await test.step('Remember sign-in and the open list across browser restarts; sign out', () => browserRestarts(fixtures, testInfo));
 });

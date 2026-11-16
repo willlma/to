@@ -6,6 +6,7 @@ defmodule To.Tasks.Task do
     field(:title, :string)
     field(:description, :string)
     field(:due_on, :date)
+    field(:position, :integer, default: 0)
     field(:nested_under, :string)
     field(:completed_at, :utc_datetime)
     field(:deleted_at, :utc_datetime)

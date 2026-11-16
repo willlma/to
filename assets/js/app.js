@@ -7,7 +7,14 @@ import "phoenix-colocated/to/colocated.css"
 const csrf = document.querySelector('meta[name="csrf-token"]').content
 // A full page load starts a new LiveView, so discard the previous view's history metadata.
 history.replaceState(null, "")
-const liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrf}, hooks})
+const liveSocket = new LiveSocket("/live", Socket, {
+  params: () => {
+    let lastLists = {}
+    try { lastLists = JSON.parse(localStorage.getItem("to:last-lists")) || {} } catch {}
+    return {_csrf_token: csrf, last_lists: lastLists}
+  },
+  hooks
+})
 liveSocket.connect()
 window.liveSocket = liveSocket
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {})

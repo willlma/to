@@ -6,6 +6,11 @@ defmodule ToWeb.ListLive do
   @completion_time_zone "America/Los_Angeles"
 
   def mount(_params, _session, socket) do
+    last_lists = (get_connect_params(socket) || %{})["last_lists"]
+
+    last_list_id =
+      if is_map(last_lists), do: last_lists[to_string(socket.assigns.current_user.id)]
+
     if connected?(socket) do
       Tasks.subscribe_lists()
       To.Sync.subscribe()
@@ -15,6 +20,8 @@ defmodule ToWeb.ListLive do
     {:ok,
      assign(socket,
        lists: Tasks.list_lists(),
+       last_list_id: last_list_id,
+       restoring_list: false,
        users: Accounts.list_users(),
        form: task_form(),
        editing_task: nil,
@@ -35,11 +42,8 @@ defmodule ToWeb.ListLive do
     lists = Tasks.list_lists()
     previous_path = socket.assigns.current_path
 
-    list =
-      case params["id"] do
-        nil -> hd(lists)
-        id -> Tasks.get_list(id) || hd(lists)
-      end
+    id = params["id"] || socket.assigns.last_list_id
+    list = Enum.find(lists, &(to_string(&1.id) == id)) || hd(lists)
 
     if connected?(socket) && socket.assigns[:list] != list do
       if socket.assigns[:list],
@@ -64,6 +68,8 @@ defmodule ToWeb.ListLive do
       |> assign(
         lists: lists,
         list: list,
+        last_list_id: to_string(list.id),
+        restoring_list: !connected?(socket) && is_nil(params["id"]),
         show_list_form: false,
         list_form: nil,
         task_dialog_open: false,
@@ -76,8 +82,11 @@ defmodule ToWeb.ListLive do
       |> load_tasks()
 
     socket =
-      if params["id"] && params["id"] != to_string(list.id),
-        do: socket |> apply_action(:index, params) |> push_patch(to: ~p"/lists", replace: true),
+      if connected?(socket) && params["id"] != to_string(list.id),
+        do:
+          socket
+          |> apply_action(:index, params)
+          |> push_patch(to: ~p"/lists/#{list.id}", replace: true),
         else: apply_action(socket, socket.assigns.live_action, params)
 
     {:noreply, socket}
@@ -213,6 +222,34 @@ defmodule ToWeb.ListLive do
 
   def handle_event("toggle-list-form", _, socket),
     do: {:noreply, assign(socket, show_list_form: !socket.assigns.show_list_form)}
+
+  def handle_event("reorder-lists", %{"ids" => ids}, socket) do
+    notice =
+      case Tasks.reorder_lists(socket.assigns.current_user, ids) do
+        {:ok, _} -> nil
+        {:error, _} -> "The lists changed. Please try dragging again."
+      end
+
+    {:noreply, assign(socket, lists: Tasks.list_lists(), notice: notice)}
+  end
+
+  def handle_event(
+        "reorder-task",
+        %{"id" => id, "target_id" => target_id, "after" => after?},
+        socket
+      ) do
+    {:noreply,
+     result(
+       socket,
+       Tasks.reorder_task(
+         socket.assigns.current_user,
+         socket.assigns.list.id,
+         id,
+         target_id,
+         after?
+       )
+     )}
+  end
 
   def handle_event("edit-list", _, socket) do
     {:noreply, push_patch(socket, to: ~p"/lists/#{socket.assigns.list.id}/edit")}
@@ -463,7 +500,24 @@ defmodule ToWeb.ListLive do
         index -> List.update_at(groups, index, fn {name, items} -> {name, items ++ [task]} end)
       end
     end)
-    |> Enum.sort_by(fn {name, _} -> is_binary(name) end)
+    |> Enum.sort_by(fn {name, items} ->
+      # A manual order within a group must not move the group itself.
+      first =
+        items
+        |> Enum.map(fn task ->
+          section =
+            case deadline_section(task) do
+              :soon -> 0
+              :undated -> 1
+              :later -> 2
+            end
+
+          {section, date(task.due_on), DateTime.to_unix(task.created_at), task.id}
+        end)
+        |> Enum.min(fn -> nil end)
+
+      {is_binary(name), first}
+    end)
   end
 
   defp task_form(attrs \\ %{}), do: to_form(Tasks.change_task(%Task{}, attrs), as: :task)
@@ -606,6 +660,7 @@ defmodule ToWeb.ListLive do
       id={"task-#{@task.id}"}
       data-task-id={@task.id}
       data-group={@task.nested_under || ""}
+      data-due-on={date(@task.due_on) || ""}
       class={[@task.completed_at && "completed", overdue?(@task) && "overdue"]}
     >
       <.form
@@ -623,7 +678,7 @@ defmodule ToWeb.ListLive do
           value="true"
           data-completion
           checked={@task.completed_at != nil}
-          title="Click to complete; drag to a group or list. Alt + Up/Down changes group; Alt + Left/Right changes list."
+          title="Click to complete; drag to reorder tasks with the same due date, or move to a group or list. Alt + Up/Down changes group; Alt + Left/Right changes list."
           aria-label={
             if @task.completed_at, do: "Reopen #{@task.title}", else: "Complete #{@task.title}"
           }
@@ -766,6 +821,11 @@ defmodule ToWeb.ListLive do
         #task-form fieldset { border: 0; margin: 0; padding: 0; }
         #task-form > [role="alert"] { flex-basis: 100%; margin: 0; }
         .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
+      .drop-before { box-shadow: 0 -2px currentColor; }
+      .drop-after { box-shadow: 0 2px currentColor; }
+      nav .drop-before { box-shadow: -2px 0 currentColor; }
+      nav .drop-after { box-shadow: 2px 0 currentColor; }
+      nav a { user-select: none; -webkit-user-select: none; }
         .grouped { margin-left: .75rem; margin-top: .25rem; }
         form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
         form[id^="group-"] button { border: 0; padding: .15rem .3rem; }
@@ -773,20 +833,25 @@ defmodule ToWeb.ListLive do
         form[id^="group-"] input:focus { border-color: #aaa; }
         nav button:focus-visible, form[id^="group-"] button:focus-visible { box-shadow: inset 0 0 0 1px light-dark(#706b60, #c4beae); }
     </style>
-    <main id="to-app" phx-hook=".QuickEntry">
+    <p :if={@restoring_list} role="status">Opening lists…</p>
+    <main
+      :if={!@restoring_list}
+      id="to-app"
+      phx-hook=".QuickEntry"
+      data-user-id={@current_user.id}
+      data-list-id={@list.id}
+    >
       <header>
         <nav aria-label="Lists">
           <%= for list <- @lists do %>
             <.link
+              id={"list-#{list.id}"}
               patch={~p"/lists/#{list.id}"}
+              draggable="false"
+              title={"Drag to reorder #{list.name}; drop a task to move it here"}
               aria-current={if list.id == @list.id, do: "page"}
               data-drop-list={list.id}
               data-drop-group={if list.id == @list.id, do: ""}
-              title={
-                if list.id == @list.id,
-                  do: "Drop a task here to remove its group",
-                  else: "Drop a task here to move it to #{list.name}"
-              }
             >{list.name}</.link>
             <button
               :if={list.id == @list.id}
@@ -1173,7 +1238,18 @@ defmodule ToWeb.ListLive do
     </main>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".QuickEntry">
       export default {
+        rememberList() {
+          if (this.savedListId === this.el.dataset.listId) return
+          try {
+            let lists = JSON.parse(localStorage.getItem("to:last-lists"))
+            if (!lists || typeof lists !== "object" || Array.isArray(lists)) lists = {}
+            lists[this.el.dataset.userId] = this.el.dataset.listId
+            localStorage.setItem("to:last-lists", JSON.stringify(lists))
+            this.savedListId = this.el.dataset.listId
+          } catch {}
+        },
         mounted() {
+          this.rememberList()
           this.handleEvent("dialog-back", () => window.history.back())
           this.keydown = event => {
             const title = document.getElementById("quick-title")
@@ -1203,7 +1279,7 @@ defmodule ToWeb.ListLive do
           this.clearDrag = () => {
             if (!this.drag) return
             this.drag.row.classList.remove("dragging")
-            this.drag.target?.classList.remove("drop-target")
+            this.drag.target?.classList.remove("drop-target", "drop-before", "drop-after")
             if (this.drag.pointerId !== -1 && this.drag.grip.hasPointerCapture(this.drag.pointerId)) {
               this.drag.grip.releasePointerCapture(this.drag.pointerId)
             }
@@ -1212,10 +1288,12 @@ defmodule ToWeb.ListLive do
           this.pointerdown = event => {
             if (event.pointerType === "touch") return
             this.skipClick = false
-            if (!event.isPrimary || event.button !== 0 || !event.target.matches('input[data-completion]')) return
-            this.drag = {row: event.target.closest("li"), grip: event.target,
+            const grip = event.target.closest('input[data-completion], a[data-drop-list]')
+            if (!event.isPrimary || event.button !== 0 || !grip) return
+            this.drag = {row: grip.closest("[data-task-id], [data-drop-list]"), grip,
+              kind: grip.matches("a") ? "list" : "task",
               pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false}
-            if (event.pointerId !== -1) event.target.setPointerCapture(event.pointerId)
+            if (event.pointerId !== -1) grip.setPointerCapture(event.pointerId)
           }
           this.pointermove = event => {
             const drag = this.drag
@@ -1224,10 +1302,32 @@ defmodule ToWeb.ListLive do
             drag.active = true
             event.preventDefault()
             drag.row.classList.add("dragging")
-            const target = document.elementFromPoint(event.clientX, event.clientY)?.closest("[data-drop-group], [data-drop-list]")
-            drag.target?.classList.remove("drop-target")
+            const hit = document.elementFromPoint(event.clientX, event.clientY)
+            let target = hit?.closest(drag.kind === "list" ? "[data-drop-list]" : "[data-drop-group], [data-drop-list]")
+            let ordered = drag.kind === "list"
+            if (drag.kind === "task") {
+              const row = hit?.closest("[data-task-id]")
+              if (row && row.dataset.group === drag.row.dataset.group) {
+                ordered = row.dataset.dueOn === drag.row.dataset.dueOn &&
+                  !!row.closest("#completed-tasks") === !!drag.row.closest("#completed-tasks")
+                target = ordered ? row : null
+              }
+            }
+            if (target === drag.row) target = null
+            drag.target?.classList.remove("drop-target", "drop-before", "drop-after")
             drag.target = this.el.contains(target) ? target : null
-            drag.target?.classList.add("drop-target")
+            if (drag.target) {
+              if (ordered) {
+                const box = drag.target.getBoundingClientRect()
+                drag.after = drag.kind === "list" ? event.clientX >= box.x + box.width / 2 : event.clientY >= box.y + box.height / 2
+                drag.target.classList.add(drag.after ? "drop-after" : "drop-before")
+              } else drag.target.classList.add("drop-target")
+            }
+            if (drag.kind === "list") {
+              const nav = drag.row.closest("nav"), box = nav.getBoundingClientRect()
+              if (event.clientX < box.left + 20) nav.scrollBy(-12, 0)
+              if (event.clientX > box.right - 20) nav.scrollBy(12, 0)
+            }
           }
           this.pointerup = event => {
             const drag = this.drag
@@ -1235,7 +1335,16 @@ defmodule ToWeb.ListLive do
             if (drag.active) {
               this.skipClick = true
               if (event.type === "pointerup" && drag.target) {
-                if (drag.target.dataset.dropList && drag.target.getAttribute("aria-current") !== "page") {
+                if (drag.kind === "list") {
+                  const ids = [...this.el.querySelectorAll("[data-drop-list]")]
+                    .map(el => el.dataset.dropList).filter(id => id !== drag.row.dataset.dropList)
+                  const index = ids.indexOf(drag.target.dataset.dropList) + (drag.after ? 1 : 0)
+                  ids.splice(index, 0, drag.row.dataset.dropList)
+                  this.pushEvent("reorder-lists", {ids})
+                } else if (drag.target.dataset.taskId) {
+                  this.pushEvent("reorder-task", {id: drag.row.dataset.taskId,
+                    target_id: drag.target.dataset.taskId, after: drag.after})
+                } else if (drag.target.dataset.dropList && drag.target.getAttribute("aria-current") !== "page") {
                   this.pushEvent("move-to-list", {id: drag.row.dataset.taskId, list_id: drag.target.dataset.dropList})
                 } else if (drag.target.dataset.dropGroup !== undefined && drag.target.dataset.dropGroup !== drag.row.dataset.group) {
                   this.pushEvent("move-task", {id: drag.row.dataset.taskId, group: drag.target.dataset.dropGroup})
@@ -1251,10 +1360,10 @@ defmodule ToWeb.ListLive do
               this.skipClick = false
             }
           }
-          // iOS native checkbox tracking can cancel pointer drags. Own the touch
-          // gesture and explicitly click only when it ends without a drag.
+          // Own touch gestures on checkboxes and tabs so iOS native tracking
+          // cannot cancel a drag. A tap still clicks the original control.
           this.touchstart = event => {
-            if (event.touches.length !== 1 || !event.target.matches('input[data-completion]')) return
+            if (event.touches.length !== 1 || !event.target.closest('input[data-completion], a[data-drop-list]')) return
             event.preventDefault()
             const touch = event.touches[0]
             this.pointerdown({target: event.target, isPrimary: true, button: 0,
@@ -1287,6 +1396,7 @@ defmodule ToWeb.ListLive do
             if (input) { input.focus(); input.select() }
           })
         },
+        updated() { this.rememberList() },
         disconnected() { document.getElementById("connection-status").hidden = false },
         reconnected() { document.getElementById("connection-status").hidden = true },
         destroyed() {
