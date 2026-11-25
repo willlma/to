@@ -42,6 +42,7 @@ defmodule To.Sync do
 
       if match?({:ok, _}, result) do
         Phoenix.PubSub.broadcast(To.PubSub, "tasks:#{list_id}", {:tasks_changed, list_id})
+        Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
       end
 
       result
@@ -110,6 +111,8 @@ defmodule To.Sync do
 
       case Repo.insert(changeset) do
         {:ok, task} ->
+          To.Tasks.mark_list_edited(list_id)
+
           case save_export(%GoogleExport{}, task, "@default", id) do
             :ok -> :ok
             {:error, error} -> Repo.rollback(error)

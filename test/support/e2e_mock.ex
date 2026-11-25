@@ -130,6 +130,17 @@ defmodule To.E2E.Mock do
     json(conn, 200, %{})
   end
 
+  post "/__age-list" do
+    last_edited_at = DateTime.utc_now() |> DateTime.add(-conn.params["days"] * 86_400, :second)
+
+    To.Tasks.get_list!(conn.params["id"])
+    |> Ecto.Changeset.change(last_edited_at: DateTime.truncate(last_edited_at, :second))
+    |> To.Repo.update!()
+
+    Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
+    json(conn, 200, %{})
+  end
+
   post "/__delay-sync-completion" do
     Agent.update(__MODULE__, &%{&1 | delayed_sync_task: conn.params["task_id"]})
     json(conn, 200, %{})

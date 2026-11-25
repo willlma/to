@@ -69,7 +69,14 @@ defmodule To.Tasks do
   def change_list(list, attrs \\ %{}), do: List.changeset(list, attrs)
 
   def rename_list(list, name) do
-    result = list |> List.changeset(%{name: name}) |> Repo.update()
+    changeset = List.changeset(list, %{name: name})
+
+    changeset =
+      if Changeset.changed?(changeset, :name),
+        do: Changeset.put_change(changeset, :last_edited_at, now()),
+        else: changeset
+
+    result = Repo.update(changeset)
 
     if match?({:ok, _}, result), do: Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
     result
@@ -154,6 +161,7 @@ defmodule To.Tasks do
 
         index = Enum.find_index(ids, &(&1 == target.id)) + if(after?, do: 1, else: 0)
         save_positions(Task, Elixir.List.insert_at(ids, index, task.id))
+        mark_list_edited(list_id)
       end)
 
     if match?({:ok, _}, result), do: broadcast(list_id)
@@ -166,7 +174,9 @@ defmodule To.Tasks do
     ids
     |> Enum.with_index()
     |> Enum.each(fn {id, position} ->
-      Repo.update_all(from(row in schema, where: row.id == ^id), set: [position: position])
+      Repo.update_all(from(row in schema, where: row.id == ^id and row.position != ^position),
+        set: [position: position]
+      )
     end)
   end
 
@@ -295,6 +305,7 @@ defmodule To.Tasks do
               ]
             )
 
+          mark_list_edited(list_id)
           count
         end
       end)
@@ -350,6 +361,13 @@ defmodule To.Tasks do
             {:error, error} -> Repo.rollback(error)
           end
 
+        if operation == :insert || map_size(changeset.changes) > 0 do
+          mark_list_edited(task.list_id)
+
+          if task.list_id != changeset.data.list_id,
+            do: mark_list_edited(changeset.data.list_id)
+        end
+
         if To.Sync.needed?(changeset, task) do
           case task |> To.Sync.enqueue() |> Oban.insert() do
             {:ok, _} -> :ok
@@ -395,7 +413,12 @@ defmodule To.Tasks do
 
   defp broadcast(list_id) do
     Phoenix.PubSub.broadcast(To.PubSub, "tasks:#{list_id}", {:tasks_changed, list_id})
+    Phoenix.PubSub.broadcast(To.PubSub, "lists", :lists_changed)
     To.Sync.broadcast_status()
+  end
+
+  def mark_list_edited(list_id) do
+    Repo.update_all(from(l in List, where: l.id == ^list_id), set: [last_edited_at: now()])
   end
 
   defp now, do: DateTime.utc_now() |> DateTime.truncate(:second)

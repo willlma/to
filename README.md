@@ -53,6 +53,12 @@ Compile before bundling assets so LiveView can generate both manifests.
   lists append at the end; rearranging tabs does not change the Google import
   destination, which remains the oldest remaining list. There are no keyboard
   shortcuts for reordering.
+- The list bar scrolls horizontally with its scrollbar hidden. Lists with no
+  edits in the last 30 days are kept intact in the collapsed **Inactive lists**
+  menu. Opening a list does not make it active. Renaming it or creating,
+  editing, completing, moving, deleting, or reordering its tasks returns it to
+  the main bar for both people. Changing tab order does not count as a content
+  edit. Existing lists start with their most recent list or task edit timestamp.
 - Delete list asks for confirmation and removes all its active and completed
   tasks for both people, cancels reminders, and queues deletion of their Google
   copies. The last remaining list cannot be deleted.
@@ -84,7 +90,8 @@ Compile before bundling assets so LiveView can generate both manifests.
   into the shared ungrouped tasks section or onto the current list link to ungroup it.
   Drop above or below another task in the same group with the same due date
   (including two undated tasks) to reorder them. The insertion line shows the
-  target position. Manual order is shared and saved in the database; dragging
+  target position, with the same dashed outline used for other drop targets.
+  Manual order is shared and saved in the database; dragging
   across different due dates cannot override date ordering. New tasks and tasks
   moved to a different date/group/list append within their new date range.
   Drop on another list link to move it to that list and clear its group, preserving
@@ -236,9 +243,10 @@ are separate from production Fly secrets.
 pnpm test:e2e
 ```
 
-One test covers the household workflow, editing and offline recovery on desktop
+The household test covers editing and offline recovery on desktop
 and mobile, shared ordering and per-client preferences, and browser restart and
-sign-out. Named steps identify each scenario, and related checks reuse sessions,
+sign-out. A separate test covers inactive lists and reactivation across clients.
+Named steps identify each scenario, and related checks reuse sessions,
 tasks, and helpers. Playwright keeps traces from closed browser contexts,
 including each browser restart, in the same report.
 

@@ -146,12 +146,14 @@ async function drag(page, source, target, {after = false, horizontal = false, to
     for (let step=1;step<=8;step++) await session.send('Input.dispatchTouchEvent',{
       type:'touchMove',touchPoints:point(from.x+(to.x-from.x)*step/8,from.y+(to.y-from.y)*step/8)
     });
+    if (horizontal) await expect(target).toHaveCSS('outline-style','dashed');
     await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
     await session.detach();
   } else {
     await page.mouse.move(from.x,from.y);
     await page.mouse.down();
     await page.mouse.move(to.x,to.y,{steps:8});
+    if (horizontal) await expect(target).toHaveCSS('outline-style','dashed');
     await page.mouse.up();
   }
 }
@@ -1793,6 +1795,85 @@ async function browserRestarts({playwright}, testInfo) {
   }
 }
 
+async function inactiveLists({page, browser, request}) {
+  const context = await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const other = await context.newPage();
+  try {
+    await signIn(page);
+    const first = await createList(page,'Old projects');
+    await createTask(page,'Keep the old project intact',{group:'Project group',description:'Still here'});
+    const second = await createList(page,'Old errands');
+    const recent = await createList(page,'Recent projects');
+    for (const name of ['Additional active list one','Additional active list two','Additional active list three']) {
+      await createList(page,name);
+    }
+    await page.goto(recent);
+    await signIn(other,'Nicole');
+    await other.goto(recent);
+    for (const [path,days] of [[first,31],[second,40],[recent,29]]) {
+      expect((await request.post('http://127.0.0.1:4010/__age-list',{
+        data:{id:path.split('/').pop(),days}
+      })).ok()).toBeTruthy();
+    }
+    const menu = page.locator('#inactive-lists');
+    await expect(menu.locator('summary')).toHaveText('Inactive lists');
+    await expect(page.getByRole('navigation',{name:'Lists'}).getByRole('link',{name:'Old projects',exact:true})).toHaveCount(0);
+    await expect(page.getByRole('link',{name:'Recent projects',exact:true})).toBeVisible();
+    await expect(menu.getByRole('link',{name:'Old projects',exact:true})).toBeHidden();
+    await menu.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    await menu.getByRole('link',{name:'Old projects',exact:true}).click();
+    await expect(taskRow(page,'Keep the old project intact')).toBeVisible();
+    await expect(taskRow(page,'Keep the old project intact').getByLabel('Description',{exact:true})).toHaveValue('Still here');
+    await taskRow(page,'Keep the old project intact').getByRole('button',{name:/^Edit /}).click();
+    await page.getByRole('dialog',{name:'Edit todo',exact:true}).getByRole('button',{name:'Save',exact:true}).click();
+    await expect(page.getByRole('dialog',{name:'Edit todo',exact:true})).toBeHidden();
+    await expect(page).toHaveURL(new URL(first,page.url()).href);
+    await expect(menu.getByRole('link',{name:'Old projects',exact:true,includeHidden:true})).toHaveCount(1);
+    await page.reload();
+    await page.locator('#inactive-lists summary').click();
+    await expect(menu.getByRole('link',{name:'Old projects',exact:true})).toHaveAttribute('aria-current','page');
+    await page.getByRole('link',{name:'Recent projects',exact:true}).click();
+    await expect(menu.getByRole('link',{name:'Old projects',exact:true,includeHidden:true})).toHaveCount(1);
+
+    // Opening is read-only; editing returns the intact list to both people's bars.
+    await other.locator('#inactive-lists summary').tap();
+    await other.getByRole('link',{name:'Old projects',exact:true}).tap();
+    await createTask(other,'An edit makes this list active');
+    for (const tab of [page,other]) {
+      await expect(tab.getByRole('navigation',{name:'Lists'}).getByRole('link',{name:'Old projects',exact:true})).toBeVisible();
+      await expect(tab.locator('#inactive-lists').getByRole('link',{name:'Old projects',exact:true,includeHidden:true})).toHaveCount(0);
+    }
+    // Reordering the visible tabs must preserve lists tucked into the menu.
+    const expected = (await listNames(page)).filter(name => name !== 'Recent projects');
+    expected.splice(expected.indexOf('Old projects'),0,'Recent projects');
+    await drag(page,page.getByRole('link',{name:'Recent projects',exact:true}),page.getByRole('link',{name:'Old projects',exact:true}),{horizontal:true});
+    await expect.poll(() => listNames(page)).toEqual(expected);
+    await expect(page.getByText('The lists changed. Please try dragging again.',{exact:true})).toHaveCount(0);
+    await expect(menu.getByRole('link',{name:'Old errands',exact:true,includeHidden:true})).toHaveCount(1);
+    await page.reload();
+    await expect.poll(() => listNames(page)).toEqual(expected);
+    const nav = page.getByRole('navigation',{name:'Lists'});
+    await expect(nav).toHaveCSS('scrollbar-width','none');
+    await expect.poll(() => nav.evaluate(el => el.scrollWidth > el.clientWidth)).toBeTruthy();
+    await nav.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+    await expect.poll(() => nav.evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
+    await page.screenshot({path:'artifacts/e2e/inactive-lists-desktop.png',fullPage:true});
+    if (!(await other.locator('#inactive-lists').evaluate(el => el.open))) {
+      await other.locator('#inactive-lists summary').tap();
+    }
+    await other.screenshot({path:'artifacts/e2e/inactive-lists-mobile.png',fullPage:true});
+    await other.getByRole('link',{name:'Old errands',exact:true}).tap();
+    await other.getByRole('button',{name:'Edit list Old errands',exact:true}).click();
+    await other.locator('#list-edit-name').fill('Reactivated errands');
+    await other.getByRole('dialog',{name:'Edit list',exact:true}).getByRole('button',{name:'Save',exact:true}).click();
+    await expect(page.locator('#inactive-lists')).toHaveCount(0);
+    await expect(page.getByRole('link',{name:'Reactivated errands',exact:true})).toBeVisible();
+  } finally {
+    await context.close();
+  }
+}
+
 test('household journey: tasks, sync, editing, ordering, recovery, and browser restarts', async ({page, browser, request, playwright}, testInfo) => {
   const fixtures = {page, browser, request, playwright};
   await test.step('Shared tasks, Google sync, reminders, and notifications', () => householdJourney(fixtures));
@@ -1800,3 +1881,5 @@ test('household journey: tasks, sync, editing, ordering, recovery, and browser r
   await test.step('Shared ordering and per-client preferences', () => orderingAndPreferences(fixtures));
   await test.step('Remember sign-in and the open list across browser restarts; sign out', () => browserRestarts(fixtures, testInfo));
 });
+
+test('Fold inactive lists without merging them; only edits reactivate them', inactiveLists);

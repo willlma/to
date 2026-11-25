@@ -792,15 +792,51 @@ defmodule ToWeb.ListLive do
   defp sync_label(:error), do: "Saved here. Google sync failed after repeated attempts."
   defp sync_label(:idle), do: ""
 
+  defp list_tab(assigns) do
+    ~H"""
+    <.link
+      id={"list-#{@list.id}"}
+      patch={~p"/lists/#{@list.id}"}
+      draggable="false"
+      title={"Drag to reorder #{@list.name}; drop a task to move it here"}
+      aria-current={if @list.id == @current_list_id, do: "page"}
+      data-drop-list={@list.id}
+      data-drop-group={if @list.id == @current_list_id, do: ""}
+    >{@list.name}</.link>
+    <button
+      :if={@list.id == @current_list_id}
+      id="edit-list"
+      type="button"
+      phx-click="edit-list"
+      aria-label={"Edit list #{@list.name}"}
+      title="Edit list"
+    ><.pen_icon /></button>
+    """
+  end
+
   def render(assigns) do
+    cutoff = DateTime.add(DateTime.utc_now(), -30, :day)
+
+    {inactive, active} =
+      Enum.split_with(assigns.lists, fn list ->
+        DateTime.before?(list.last_edited_at || list.updated_at, cutoff)
+      end)
+
+    assigns = assign(assigns, active_lists: active, inactive_lists: inactive)
+
     ~H"""
     <style :type={ToWeb.ColocatedCSS}>
         header, nav, #list-form, #task-form { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
-        header { min-height: 2rem; flex-wrap: nowrap; }
+        header { min-height: 2rem; flex-wrap: nowrap; position: relative; }
         header > a { text-decoration: none; flex-shrink: 0; }
-        header nav { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; }
+        header nav { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 3px; }
+        header nav::-webkit-scrollbar { display: none; }
         nav > * { flex-shrink: 0; white-space: nowrap; }
         nav button { border: 0; }
+      #inactive-lists { margin: 0; flex-shrink: 0; }
+      #inactive-lists > ul { position: absolute; right: 0; top: 100%; z-index: 1; padding: .5rem; border: 1px solid #888; background: light-dark(#faf9f6, #171716); max-width: min(26rem, calc(100vw - 2rem)); max-height: 60vh; overflow: auto; }
+      #inactive-lists li { display: flex; align-items: center; gap: .5rem; padding: .3rem; overflow-wrap: anywhere; }
+      #inactive-lists button { border: 0; }
         [aria-current="page"] { font-weight: bold; }
         #quick-title, #task-title, #list-edit-name { width: 100%; box-sizing: border-box; }
         #quick-title { margin: 1rem 0; }
@@ -820,12 +856,12 @@ defmodule ToWeb.ListLive do
       section[data-drop-group=""] { min-height: 2rem; }
         #task-form fieldset { border: 0; margin: 0; padding: 0; }
         #task-form > [role="alert"] { flex-basis: 100%; margin: 0; }
-        .drop-target { outline: 1px dashed #888; outline-offset: 2px; }
+        .drop-target, .drop-before, .drop-after { outline: 1px dashed #888; outline-offset: 2px; }
       .drop-before { box-shadow: 0 -2px currentColor; }
       .drop-after { box-shadow: 0 2px currentColor; }
       nav .drop-before { box-shadow: -2px 0 currentColor; }
       nav .drop-after { box-shadow: 2px 0 currentColor; }
-      nav a { user-select: none; -webkit-user-select: none; }
+      a[data-drop-list] { user-select: none; -webkit-user-select: none; }
         .grouped { margin-left: .75rem; margin-top: .25rem; }
         form[id^="group-"] { margin-top: .35rem; display: flex; align-items: center; gap: .25rem; }
         form[id^="group-"] button { border: 0; padding: .15rem .3rem; }
@@ -840,28 +876,11 @@ defmodule ToWeb.ListLive do
       phx-hook=".QuickEntry"
       data-user-id={@current_user.id}
       data-list-id={@list.id}
+      data-list-order={Jason.encode!(Enum.map(@lists, &to_string(&1.id)))}
     >
       <header>
         <nav aria-label="Lists">
-          <%= for list <- @lists do %>
-            <.link
-              id={"list-#{list.id}"}
-              patch={~p"/lists/#{list.id}"}
-              draggable="false"
-              title={"Drag to reorder #{list.name}; drop a task to move it here"}
-              aria-current={if list.id == @list.id, do: "page"}
-              data-drop-list={list.id}
-              data-drop-group={if list.id == @list.id, do: ""}
-            >{list.name}</.link>
-            <button
-              :if={list.id == @list.id}
-              id="edit-list"
-              type="button"
-              phx-click="edit-list"
-              aria-label={"Edit list #{list.name}"}
-              title="Edit list"
-            ><.pen_icon /></button>
-          <% end %>
+          <.list_tab :for={list <- @active_lists} list={list} current_list_id={@list.id} />
           <button
             type="button"
             phx-click="toggle-list-form"
@@ -870,6 +889,18 @@ defmodule ToWeb.ListLive do
             aria-controls="list-form"
           >+</button>
         </nav>
+        <details
+          :if={@inactive_lists != []}
+          id="inactive-lists"
+          phx-mounted={JS.ignore_attributes(["open"])}
+        >
+          <summary>Inactive lists</summary>
+          <ul>
+            <li :for={list <- @inactive_lists}>
+              <.list_tab list={list} current_list_id={@list.id} />
+            </li>
+          </ul>
+        </details>
         <.link navigate={~p"/settings"} aria-label={"Settings for #{@current_user.name}"}>
           <.person_circle user={@current_user} />
         </.link>
@@ -1324,7 +1355,7 @@ defmodule ToWeb.ListLive do
               } else drag.target.classList.add("drop-target")
             }
             if (drag.kind === "list") {
-              const nav = drag.row.closest("nav"), box = nav.getBoundingClientRect()
+              const nav = this.el.querySelector("nav"), box = nav.getBoundingClientRect()
               if (event.clientX < box.left + 20) nav.scrollBy(-12, 0)
               if (event.clientX > box.right - 20) nav.scrollBy(12, 0)
             }
@@ -1336,8 +1367,8 @@ defmodule ToWeb.ListLive do
               this.skipClick = true
               if (event.type === "pointerup" && drag.target) {
                 if (drag.kind === "list") {
-                  const ids = [...this.el.querySelectorAll("[data-drop-list]")]
-                    .map(el => el.dataset.dropList).filter(id => id !== drag.row.dataset.dropList)
+                  const ids = JSON.parse(this.el.dataset.listOrder)
+                    .filter(id => id !== drag.row.dataset.dropList)
                   const index = ids.indexOf(drag.target.dataset.dropList) + (drag.after ? 1 : 0)
                   ids.splice(index, 0, drag.row.dataset.dropList)
                   this.pushEvent("reorder-lists", {ids})
