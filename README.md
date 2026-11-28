@@ -183,8 +183,11 @@ Compile before bundling assets so LiveView can generate both manifests.
    at `https://town.fly.dev/mcp`, choose **Streamable**, and paste the complete
    `Bearer …` value into **Authorization**.
 3. Add Town to **Default MCP Sandbox**, keep **Hold & Talk → Index agent**, and
-   use **Cloud LLM** (or **Cloud LLM with Local fallback**). Normal notes and
-   Google Tasks reminders stay available. Try “Add milk to Groceries in Town.”
+   use **Cloud LLM** (or **Cloud LLM with Local fallback**). Disable the Google Tasks
+   integration in Pebble so task and reminder requests go to Town. Keep your normal
+   notes integration enabled. Try “Add butter to Groceries” and “Remind me to call
+   the plumber tomorrow.” If Pebble offers a server Description, enter “Town shared
+   tasks, reminders, and shopping lists. Use add_task for list items; keep normal notes.”
 
 Each person has one token, shown once and stored as a SHA-256 hash. It has no
 automatic expiry; replace or revoke it in Settings. Replacement requires updating
@@ -194,7 +197,9 @@ Pebble. This connection needs internet, without Home Assistant or a VPN.
 America/Los_Angeles. `add_task` accepts a list ID, title, and optional description,
 date (`YYYY-MM-DD`), assignee, and group. The assistant uses the default list when
 none is named and asks about ambiguous names. The token owner is the creator;
-tasks are unassigned unless requested. Existing sync, reminders, and live updates
+“remind me” tasks are assigned to them, other tasks only when requested. Town
+supports dates and day-before notifications, not exact-time reminders; the assistant
+should ask before substituting a dated task. Existing sync, reminders, and live updates
 apply. Notification failures return a warning after saving. Retrying an addition
 after a lost response can create a duplicate; check Town before repeating it.
 
@@ -202,6 +207,9 @@ The stateless endpoint supports MCP `2025-03-26`, `2025-06-18`, and `2025-11-25`
 Run `pnpm test:e2e test/e2e/pebble.spec.js` for browser traces and screenshots in
 `artifacts/e2e/`. Actual ring recordings still need device verification.
 See [Pebble's MCP documentation](https://developer.repebble.com/index-01/mcp/).
+After a server update, reconnect it in Pebble or allow its five-minute tool cache
+to expire. For device verification, repeat the examples above, check the items in
+Town, then record an ordinary note and check it still uses the notes integration.
 
 ## Google and push setup
 

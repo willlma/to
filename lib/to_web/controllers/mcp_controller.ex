@@ -7,14 +7,15 @@ defmodule ToWeb.MCPController do
   @tools [
     %{
       name: "list_lists",
-      description: "Find shared lists, their IDs, the default list, and today's date.",
+      description:
+        "Find Town task and shopping lists and their IDs. Then use add_task to add an item.",
       inputSchema: %{type: "object", properties: %{}, additionalProperties: false},
       annotations: %{readOnlyHint: true}
     },
     %{
       name: "add_task",
       description:
-        "Add a task to a list ID from list_lists. Only set optional fields when requested.",
+        "Save a task, reminder, or shopping item in Town. Use a list ID from list_lists.",
       inputSchema: %{
         type: "object",
         properties: %{
@@ -25,7 +26,7 @@ defmodule ToWeb.MCPController do
             type: ["string", "null"],
             description: "YYYY-MM-DD; use list_lists.today for relative dates."
           },
-          assignee: %{enum: ["Nicole", "Will", nil]},
+          assignee: %{type: "string", enum: ["Nicole", "Will"]},
           group: %{type: ["string", "null"], maxLength: 100}
         },
         required: ["list_id", "title"],
@@ -89,9 +90,15 @@ defmodule ToWeb.MCPController do
       capabilities: %{tools: %{}},
       serverInfo: %{name: "Town", version: "1.0.0"},
       instructions:
-        "Use list_lists before add_task. Ask about ambiguous list names; " <>
-          "use default_list_id if none was named. Dates use America/Los_Angeles. " <>
-          "The creator is #{user.name}; assign only when asked. Confirm saved tasks only. " <>
+        "Town is the default for tasks, reminders, and list additions, including groceries. " <>
+          "Call list_lists to find the list ID, then add_task to save the item. " <>
+          "Town list names are not note destinations: never pass them to create_note. " <>
+          "Keep ordinary notes with the user's existing notes integration. " <>
+          "Ask about ambiguous list names; use default_list_id if none was named. " <>
+          "Dates use America/Los_Angeles. Town supports date-only tasks and day-before " <>
+          "notifications; ask before substituting a dated task for an exact-time reminder. " <>
+          "The creator is #{user.name}; assign 'remind me' tasks to #{user.name}, " <>
+          "otherwise assign only when asked. Confirm saved tasks only. " <>
           "A warning means saved; an error means nothing was saved."
     }
   end
@@ -108,6 +115,9 @@ defmodule ToWeb.MCPController do
 
   defp tool("list_lists", arguments, _) when is_map(arguments) and map_size(arguments) == 0 do
     tool_result(%{
+      instructions:
+        "To add an item, call add_task with its title and a list_id below. " <>
+          "These are Town task lists, not create_note destinations. Listing them saves nothing.",
       lists: Enum.map(Tasks.list_lists(), &Map.take(&1, [:id, :name])),
       default_list_id: Tasks.default_list().id,
       today: DateTime.now!("America/Los_Angeles") |> DateTime.to_date(),

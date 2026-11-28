@@ -239,7 +239,8 @@ defmodule ToWeb.SettingsLive do
         <p>
           In Pebble's MCP settings, add Town with Streamable transport to Default MCP Sandbox.
           Keep Hold &amp; Talk on Index agent with Cloud LLM enabled.
-          Try “Add milk to Groceries in Town.” Tasks are created as {@current_user.name}.
+          Disable Google Tasks in Pebble and keep your notes integration enabled.
+          Try “Add butter to Groceries.” Tasks are created as {@current_user.name}.
         </p>
         <label>
           Pebble MCP URL <input type="url" value={url(~p"/mcp")} readonly />

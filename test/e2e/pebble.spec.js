@@ -76,7 +76,12 @@ test('Pebble credentials, MCP discovery, and additions reach both household brow
       expect(notification.status()).toBe(202);
       expect(await notification.text()).toBe('');
       const tools = (await (await rpc(request, willToken, 'tools/list')).json()).result.tools;
-      expect(tools.map(tool => tool.name)).toEqual(['list_lists','add_task']);
+      // Pebble drops a whole tool if any top-level parameter has neither type
+      // nor anyOf. An enum alone is valid JSON Schema but hides add_task there.
+      // See AgentNenya.prepareTools/toParameter in coredevices/mobileapp.
+      const callableTools = tools.filter(tool => Object.values(tool.inputSchema.properties)
+        .every(parameter => parameter.type || parameter.anyOf));
+      expect(callableTools.map(tool => tool.name)).toEqual(['list_lists','add_task']);
       const lists = await callTool(request, willToken, 'list_lists', {});
       expect(JSON.parse(lists.content[0].text).lists).toContainEqual({id:listId,name:'Pebble groceries'});
       expect((await request.get('/mcp', {headers:{Authorization:`Bearer ${willToken}`,Accept:'text/event-stream'}})).status()).toBe(405);
