@@ -16,6 +16,15 @@ defmodule ToWeb.Router do
     plug :require_user
   end
 
+  pipeline :mcp do
+    plug :require_pebble_token
+  end
+
+  scope "/", ToWeb do
+    pipe_through :mcp
+    match :*, "/mcp", MCPController, :handle
+  end
+
   scope "/", ToWeb do
     pipe_through :browser
     get "/", PageController, :home

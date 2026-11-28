@@ -21,6 +21,29 @@ defmodule To.Accounts do
   def get_user(id) when is_integer(id), do: Repo.get(User, id)
   def get_user(_), do: nil
 
+  def generate_pebble_token(%User{} = user) do
+    token = "town_" <> Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+    case user |> Ecto.Changeset.change(pebble_token_hash: token_hash(token)) |> Repo.update() do
+      {:ok, user} -> {:ok, user, token}
+      error -> error
+    end
+  end
+
+  def revoke_pebble_token(%User{} = user) do
+    user
+    |> Ecto.Changeset.change()
+    |> Ecto.Changeset.force_change(:pebble_token_hash, nil)
+    |> Repo.update()
+  end
+
+  def authenticate_pebble_token("town_" <> _ = token) when byte_size(token) == 48,
+    do: Repo.get_by(User, pebble_token_hash: token_hash(token))
+
+  def authenticate_pebble_token(_), do: nil
+
+  defp token_hash(token), do: :crypto.hash(:sha256, token)
+
   def upsert_google_user(profile, tokens) do
     with true <- profile["email_verified"] in [true, "true"],
          sub when is_binary(sub) and byte_size(sub) > 0 <- profile["sub"],

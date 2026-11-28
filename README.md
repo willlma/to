@@ -176,6 +176,33 @@ Compile before bundling assets so LiveView can generate both manifests.
   or reloading the page does not promise draft recovery. Concurrent edits use the
   last saved values; there is no conflict-resolution interface in this first pass.
 
+## Pebble Index setup
+
+1. Open **Town Settings → Pebble Index → Generate Pebble token**.
+2. In **Pebble Index settings → MCP & Tool Settings → MCP Servers**, add `Town`
+   at `https://town.fly.dev/mcp`, choose **Streamable**, and paste the complete
+   `Bearer …` value into **Authorization**.
+3. Add Town to **Default MCP Sandbox**, keep **Hold & Talk → Index agent**, and
+   use **Cloud LLM** (or **Cloud LLM with Local fallback**). Normal notes and
+   Google Tasks reminders stay available. Try “Add milk to Groceries in Town.”
+
+Each person has one token, shown once and stored as a SHA-256 hash. It has no
+automatic expiry; replace or revoke it in Settings. Replacement requires updating
+Pebble. This connection needs internet, without Home Assistant or a VPN.
+
+`list_lists` returns all shared lists, the default list ID, and today's date in
+America/Los_Angeles. `add_task` accepts a list ID, title, and optional description,
+date (`YYYY-MM-DD`), assignee, and group. The assistant uses the default list when
+none is named and asks about ambiguous names. The token owner is the creator;
+tasks are unassigned unless requested. Existing sync, reminders, and live updates
+apply. Notification failures return a warning after saving. Retrying an addition
+after a lost response can create a duplicate; check Town before repeating it.
+
+The stateless endpoint supports MCP `2025-03-26`, `2025-06-18`, and `2025-11-25`.
+Run `pnpm test:e2e test/e2e/pebble.spec.js` for browser traces and screenshots in
+`artifacts/e2e/`. Actual ring recordings still need device verification.
+See [Pebble's MCP documentation](https://developer.repebble.com/index-01/mcp/).
+
 ## Google and push setup
 
 For local development, put the variables below under `[env]` in

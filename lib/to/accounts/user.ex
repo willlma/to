@@ -7,6 +7,7 @@ defmodule To.Accounts.User do
     field(:email, :string)
     field(:google_sub, :string)
     field(:google_refresh_token, :string, redact: true)
+    field(:pebble_token_hash, :binary, redact: true)
     field(:google_task_list_id, :string)
     field(:reminder_time, :time, default: ~T[18:00:00])
 

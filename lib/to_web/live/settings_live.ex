@@ -6,10 +6,32 @@ defmodule ToWeb.SettingsLive do
     {:ok,
      assign(socket,
        notice: nil,
+       pebble_token: nil,
        importing: false,
        google_reconnect: false,
        vapid_key: Application.get_env(:ex_nudge, :vapid_public_key)
      )}
+  end
+
+  def handle_event("generate-pebble-token", _, socket) do
+    case To.Accounts.generate_pebble_token(socket.assigns.current_user) do
+      {:ok, user, token} ->
+        {:noreply, assign(socket, current_user: user, pebble_token: token, notice: nil)}
+
+      {:error, _} ->
+        {:noreply, assign(socket, notice: "Could not generate a Pebble token. Try again.")}
+    end
+  end
+
+  def handle_event("revoke-pebble-token", _, socket) do
+    case To.Accounts.revoke_pebble_token(socket.assigns.current_user) do
+      {:ok, user} ->
+        {:noreply,
+         assign(socket, current_user: user, pebble_token: nil, notice: "Pebble token revoked.")}
+
+      {:error, _} ->
+        {:noreply, assign(socket, notice: "Could not revoke the Pebble token. Try again.")}
+    end
   end
 
   def handle_event("import-google", _, socket) do
@@ -212,6 +234,38 @@ defmodule ToWeb.SettingsLive do
       <% else %>
         <p>Google sync is disabled for local development.</p>
       <% end %>
+      <details id="pebble-settings" open>
+        <summary>Pebble Index</summary>
+        <p>
+          In Pebble's MCP settings, add Town with Streamable transport to Default MCP Sandbox.
+          Keep Hold &amp; Talk on Index agent with Cloud LLM enabled.
+          Try “Add milk to Groceries in Town.” Tasks are created as {@current_user.name}.
+        </p>
+        <label>
+          Pebble MCP URL <input type="url" value={url(~p"/mcp")} readonly />
+        </label>
+        <p>
+          Your token can read list names and add tasks to any shared list.
+          It stays valid until replaced or revoked. After replacing it, update Pebble too.
+        </p>
+        <button type="button" phx-click="generate-pebble-token">
+          {if @current_user.pebble_token_hash,
+            do: "Replace Pebble token",
+            else: "Generate Pebble token"}
+        </button>
+        <button
+          :if={@current_user.pebble_token_hash}
+          type="button"
+          phx-click="revoke-pebble-token"
+        >Revoke Pebble token</button>
+        <%= if @pebble_token do %>
+          <label>
+            Pebble authorization
+            <input type="text" value={"Bearer " <> @pebble_token} readonly autocomplete="off" />
+          </label>
+          <p role="status">Copy this into Pebble's Authorization field. It is only shown now.</p>
+        <% end %>
+      </details>
       <.form for={%{}} action="/logout" method="delete"><button>Sign out</button></.form>
       <p><.link href={~p"/pp"}>Privacy policy</.link></p>
       <p :if={@notice} role="status">{@notice}</p>
